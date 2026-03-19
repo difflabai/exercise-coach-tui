@@ -1,13 +1,25 @@
 #!/bin/bash
+
+# Cross-platform TTS: macOS `say`, Linux `espeak` or `spd-say`
+speak() {
+  if command -v say &>/dev/null; then
+    say "$1"
+  elif command -v espeak &>/dev/null; then
+    espeak "$1"
+  elif command -v spd-say &>/dev/null; then
+    spd-say "$1"
+  fi
+}
+
 for set in 1 2 3; do
-  say "Set $set. Get in position."
+  speak "Set $set. Get in position."
   sleep 3
-  say "Go"
+  speak "Go"
   sleep 40
-  say "Done. Set $set complete."
+  speak "Done. Set $set complete."
   if [ $set -lt 3 ]; then
-    say "Rest 60 seconds"
+    speak "Rest 60 seconds"
     sleep 60
   fi
 done
-say "RKC Planks done. 3 sets of 40 seconds."
+speak "RKC Planks done. 3 sets of 40 seconds."

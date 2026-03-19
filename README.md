@@ -43,4 +43,11 @@ Progress auto-saves on every completed set and on Ctrl-C. Re-run the same workou
 
 ## Voice
 
-Uses macOS `say` for coaching cues. Silently skipped on other platforms.
+Uses macOS `say` or Linux `espeak`/`spd-say` for coaching cues. Silently skipped if no TTS is available.
+
+On Linux, install a TTS engine:
+
+```
+sudo apt install espeak      # Debian/Ubuntu
+sudo dnf install espeak-ng   # Fedora
+```
