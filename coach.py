@@ -144,34 +144,70 @@ def exercises_match(a: list[Exercise], b: list[Exercise]) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Voice coaching (non-blocking macOS `say`)
+# Voice coaching (macOS `say`, Linux `espeak`/`spd-say`)
 # ---------------------------------------------------------------------------
 
 _say_proc: subprocess.Popen | None = None
 
 
+def _tts_cmd(text: str) -> list[str]:
+    """Return the TTS command + args for the current platform."""
+    if sys.platform == "darwin":
+        return ["say", text]
+    # Linux: prefer espeak, fall back to spd-say
+    for cmd in ("espeak", "spd-say"):
+        if _which(cmd):
+            return [cmd, text]
+    return []
+
+
+def _which(cmd: str) -> bool:
+    """Check whether *cmd* is on PATH (cached)."""
+    if cmd not in _which_cache:
+        _which_cache[cmd] = (
+            subprocess.call(
+                ["which", cmd],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            == 0
+        )
+    return _which_cache[cmd]
+
+
+_which_cache: dict[str, bool] = {}
+
+
 def say(text: str) -> None:
     global _say_proc
+    cmd = _tts_cmd(text)
+    if not cmd:
+        return
     try:
         if _say_proc and _say_proc.poll() is None:
             _say_proc.terminate()
         _say_proc = subprocess.Popen(
-            ["say", text],
+            cmd,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
     except FileNotFoundError:
-        pass  # not on macOS
+        pass
 
 
 def say_sync(text: str, wait: float = 0) -> None:
     """Say something and optionally wait after it finishes."""
     global _say_proc
+    cmd = _tts_cmd(text)
+    if not cmd:
+        if wait > 0:
+            time.sleep(wait)
+        return
     try:
         if _say_proc and _say_proc.poll() is None:
             _say_proc.terminate()
         _say_proc = subprocess.Popen(
-            ["say", text],
+            cmd,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
