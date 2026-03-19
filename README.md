@@ -1,8 +1,8 @@
 # exercise-coach-tui
 
-Interactive terminal workout companion with voice coaching (macOS `say`).
+Supplementary TUI for [ai-health](https://github.com/difflabai/ai-health) — an interactive terminal workout companion with voice coaching (macOS `say`).
 
-Paste or pipe in a workout plan, and it walks you through each set with a Rich TUI — rest timers, timed holds, progress tracking, and voice cues.
+ai-health generates your workout plans; this tool walks you through each set with a Rich TUI — rest timers, timed holds, progress tracking, and voice cues.
 
 ## Usage
 
