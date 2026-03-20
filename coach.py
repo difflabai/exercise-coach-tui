@@ -168,6 +168,23 @@ HOLD_MESSAGES = [
     "Don't quit on me now!",
     "That's it, right there, perfect form!",
     "Embrace the burn!",
+    "Your muscles are screaming but your spirit is louder!",
+    "If it was easy, everyone would do it!",
+    "Gravity is optional, you decide!",
+    "I've seen statues with worse form than you!",
+    "Pretend the floor is lava!",
+    "Your future self is thanking you right now!",
+    "That shake means it's working!",
+    "Channel your inner superhero!",
+    "You are literally a machine right now!",
+    "Nothing can stop you, nothing!",
+    "Who needs comfort anyway?",
+    "This is your moment, own it!",
+    "Breathe deep, you beautiful beast!",
+    "Steel yourself, you're almost through!",
+    "Quitting is not in your vocabulary!",
+    "You're built different, prove it!",
+    "The burn is just your muscles applauding!",
 ]
 
 REST_MESSAGES = [
@@ -186,6 +203,79 @@ REST_MESSAGES = [
     "Beast mode activated!",
     "Respect the rest, then attack the next set.",
     "Looking good, keep that energy!",
+    "That set didn't stand a chance!",
+    "You just made that look easy!",
+    "Your muscles don't know what hit them!",
+    "If that set was a test, you just aced it!",
+    "Somebody call the fire department, because you are on fire!",
+    "Rest up champ, the next round awaits!",
+    "You're not just working out, you're leveling up!",
+    "Hydrate, ventilate, dominate!",
+    "That was disgusting. Disgustingly good!",
+    "The weights are afraid of you now!",
+    "You're making gains and taking names!",
+    "Catch your breath, legend!",
+    "The couch misses you but you don't miss it!",
+    "Quick break, then we go again. You ready?",
+    "Your body is a temple and you're renovating!",
+    "Somewhere, a gym bro just nodded in respect!",
+    "Another set in the bank. Interest is compounding!",
+]
+
+GO_MESSAGES = [
+    "Go!",
+    "Let's go!",
+    "Send it!",
+    "Get after it!",
+    "Unleash!",
+    "Attack!",
+    "Fire it up!",
+    "Here we go!",
+    "Light it up!",
+    "Now!",
+]
+
+DONE_MESSAGES = [
+    "Done!",
+    "Boom!",
+    "Nailed it!",
+    "That's a wrap!",
+    "Money!",
+    "And relax!",
+    "Crushed it!",
+    "Beautiful!",
+    "Drop it!",
+    "Finished!",
+]
+
+OVERTIME_MESSAGES = [
+    "Time's up, let's go!",
+    "Clock's run out, wrap it up!",
+    "You're on borrowed time!",
+    "Overtime! Finish strong!",
+    "That's time! Move it!",
+    "The buzzer went off, let's go!",
+]
+
+EXERCISE_COMPLETE_MESSAGES = [
+    "{name} complete!",
+    "{name} destroyed!",
+    "{name}, done and dusted!",
+    "{name} demolished!",
+    "{name} in the books!",
+    "{name}, checked off!",
+    "Say goodbye to {name}!",
+]
+
+WORKOUT_COMPLETE_MESSAGES = [
+    "Workout complete! Great job.",
+    "That's a wrap! You absolutely killed it.",
+    "Done! Go eat something, you've earned it.",
+    "Workout finished! You're a machine.",
+    "All done! The gym fears you now.",
+    "Complete! Time to flex in the mirror.",
+    "Workout demolished! Champion status unlocked.",
+    "Finished! Your future self just high-fived you.",
 ]
 
 _say_proc: subprocess.Popen | None = None
@@ -479,14 +569,14 @@ def rest_timer(
                 timer_style = "bold red"
                 if overtime_secs >= nag_interval and overtime_secs // nag_interval > nagged_at:
                     nagged_at = overtime_secs // nag_interval
-                    say("Time's up, let's go")
+                    say(random.choice(OVERTIME_MESSAGES))
             else:
                 secs_left = int(remaining) + 1
                 timer_text = f"Rest: {secs_left}s remaining  (press Enter to skip)"
                 timer_style = "bold yellow"
                 if remaining <= 0.5 and nagged_at == 0:
                     nagged_at = -1
-                    say("Time's up, let's go")
+                    say(random.choice(OVERTIME_MESSAGES))
 
             overview = build_overview(exercises, current_idx)
             panel = build_active_panel(
@@ -541,7 +631,7 @@ def timed_hold(
         live.update(layout)
         time.sleep(1)
 
-    say("Go")
+    say(random.choice(GO_MESSAGES))
 
     # Pick two distinct motivational messages for mid and 75% marks
     hold_msgs = random.sample(HOLD_MESSAGES, min(2, len(HOLD_MESSAGES)))
@@ -576,7 +666,7 @@ def timed_hold(
         live.update(layout)
         time.sleep(0.25)
 
-    say("Done")
+    say(random.choice(DONE_MESSAGES))
 
 
 # ---------------------------------------------------------------------------
@@ -657,10 +747,10 @@ def run_workout(exercises: list[Exercise], rest_seconds: int) -> None:
                 if not (is_last_set_of_exercise and is_last_exercise):
                     if is_last_set_of_exercise:
                         play_sound(_SOUND_EXERCISE_COMPLETE)
-                        say(f"{ex.name} complete!")
+                        say(random.choice(EXERCISE_COMPLETE_MESSAGES).format(name=ex.name))
                     rest_timer(exercises, ex_idx, rest_seconds, live, ex, set_num, avg_rep_set())
 
-    say("Workout complete! Great job.")
+    say(random.choice(WORKOUT_COMPLETE_MESSAGES))
     console.print("[bold green]Workout complete![/bold green]\n")
     print_log(exercises)
     clear_state()
