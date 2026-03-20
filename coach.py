@@ -46,10 +46,12 @@ class Exercise:
     def done(self) -> bool:
         return self.completed_sets >= self.total_sets
 
-    def log_str(self) -> str:
+    def log_str(self, show_progress: bool = True) -> str:
         reps_str = f"{self.reps}s" if self.timed else str(self.reps)
         weight_part = f" | {self.weight}" if self.weight else ""
-        return f"{self.name:<25} {self.total_sets}[{self.completed_sets}]×{reps_str}{weight_part}"
+        if show_progress:
+            return f"{self.name:<25} {self.total_sets}[{self.completed_sets}]×{reps_str}{weight_part}"
+        return f"{self.name:<25} {self.total_sets}×{reps_str}{weight_part}"
 
 
 # ---------------------------------------------------------------------------
@@ -315,7 +317,7 @@ def say_sync(text: str, wait: float = 0) -> None:
 def format_log(exercises: list[Exercise]) -> str:
     lines = []
     for ex in exercises:
-        lines.append(ex.log_str())
+        lines.append(ex.log_str(show_progress=False))
     return "\n".join(lines)
 
 
