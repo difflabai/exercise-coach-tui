@@ -4,6 +4,7 @@
 import argparse
 import json
 import os
+import random
 import re
 import select
 import subprocess
@@ -146,6 +147,42 @@ def exercises_match(a: list[Exercise], b: list[Exercise]) -> bool:
 # ---------------------------------------------------------------------------
 # Voice coaching (non-blocking macOS `say`)
 # ---------------------------------------------------------------------------
+
+HOLD_MESSAGES = [
+    "You're doing great, keep holding!",
+    "Stay strong, don't give up!",
+    "Breathe through it!",
+    "Almost there, keep pushing!",
+    "You're tougher than you think!",
+    "Hold it, hold it, hold it!",
+    "This is where champions are made!",
+    "Pain is temporary, pride is forever!",
+    "Squeeze harder, let's go!",
+    "You've got this, stay tight!",
+    "Mind over matter, keep going!",
+    "Every second counts, stay in it!",
+    "Don't quit on me now!",
+    "That's it, right there, perfect form!",
+    "Embrace the burn!",
+]
+
+REST_MESSAGES = [
+    "Nice work on that set!",
+    "Shake it out, you earned this rest.",
+    "Great effort, keep it up!",
+    "Solid set, stay focused.",
+    "You're crushing it today!",
+    "Way to push through!",
+    "That looked strong!",
+    "Recover and reload.",
+    "One step closer to the finish!",
+    "Enjoy the break, next set's gonna be even better.",
+    "You're making progress, keep showing up!",
+    "Take a breath, you've earned it.",
+    "Beast mode activated!",
+    "Respect the rest, then attack the next set.",
+    "Looking good, keep that energy!",
+]
 
 _say_proc: subprocess.Popen | None = None
 
@@ -302,6 +339,7 @@ def rest_timer(
     set_num: int,
 ) -> None:
     """Countdown rest timer. Enter to skip. Voice nags when overtime."""
+    say(random.choice(REST_MESSAGES))
     start = time.time()
     nag_interval = 15
     nagged_at = 0
@@ -383,12 +421,25 @@ def timed_hold(
 
     say("Go")
 
+    # Pick two distinct motivational messages for mid and 75% marks
+    hold_msgs = random.sample(HOLD_MESSAGES, min(2, len(HOLD_MESSAGES)))
+    mid_said = False
+    three_quarter_said = False
+
     start = time.time()
     while True:
         elapsed = time.time() - start
         remaining = duration - elapsed
         if remaining <= 0:
             break
+
+        pct = elapsed / duration
+        if pct >= 0.5 and not mid_said:
+            mid_said = True
+            say(hold_msgs[0])
+        elif pct >= 0.75 and not three_quarter_said:
+            three_quarter_said = True
+            say(hold_msgs[1] if len(hold_msgs) > 1 else hold_msgs[0])
 
         secs_left = int(remaining) + 1
         overview = build_overview(exercises, current_idx)
