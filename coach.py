@@ -698,7 +698,7 @@ def read_input(file_path: str | None) -> str:
 # Resume logic
 # ---------------------------------------------------------------------------
 
-def try_resume(parsed: list[Exercise]) -> list[Exercise]:
+def try_resume(parsed: list[Exercise], auto: bool = False) -> list[Exercise]:
     console = Console(stderr=True)
     result = load_state()
     if result is None:
@@ -707,7 +707,7 @@ def try_resume(parsed: list[Exercise]) -> list[Exercise]:
     saved, ts = result
     age_hours = (time.time() - ts) / 3600
 
-    if not exercises_match(parsed, saved):
+    if not auto and not exercises_match(parsed, saved):
         console.print("[yellow]Saved state doesn't match current workout, starting fresh.[/yellow]")
         clear_state()
         return parsed
@@ -726,6 +726,11 @@ def try_resume(parsed: list[Exercise]) -> list[Exercise]:
     console.print(
         f"[cyan]Saved progress found: {total_done}/{done_total} sets complete.[/cyan]"
     )
+
+    if auto:
+        console.print("[green]Resuming...[/green]")
+        return saved
+
     console.print("[cyan]Resume? (Y/n):[/cyan] ", end="")
 
     try:
@@ -749,6 +754,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Workout Coach TUI")
     parser.add_argument("file", nargs="?", help="Workout file to read")
     parser.add_argument("--rest", type=int, default=75, help="Rest seconds between sets (default: 75)")
+    parser.add_argument("--resume", action="store_true", help="Resume last workout without re-entering it")
     parser.add_argument("--reset", action="store_true", help="Discard saved state and exit")
     parser.add_argument("--log", action="store_true", help="Print current saved log and exit")
     args = parser.parse_args()
@@ -767,14 +773,26 @@ def main() -> None:
             print("No saved state.")
         return
 
-    text = read_input(args.file)
-    exercises = parse_workout(text)
+    if args.resume:
+        result = load_state()
+        if result is None:
+            print("No saved state to resume.", file=sys.stderr)
+            sys.exit(1)
+        exercises, _ = result
+        total_done = sum(e.completed_sets for e in exercises)
+        if total_done == 0:
+            print("No progress to resume.", file=sys.stderr)
+            clear_state()
+            sys.exit(1)
+    else:
+        text = read_input(args.file)
+        exercises = parse_workout(text)
 
-    if not exercises:
-        print("No exercises parsed. Check your input format.", file=sys.stderr)
-        sys.exit(1)
+        if not exercises:
+            print("No exercises parsed. Check your input format.", file=sys.stderr)
+            sys.exit(1)
 
-    exercises = try_resume(exercises)
+        exercises = try_resume(exercises)
 
     try:
         run_workout(exercises, args.rest)
