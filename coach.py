@@ -152,6 +152,8 @@ HOLD_MESSAGES = [
     "You're doing great, keep holding!",
     "Stay strong, don't give up!",
     "Breathe through it!",
+    "Remember to breathe!",
+    "Deep breaths into the stomach!",
     "Almost there, keep pushing!",
     "You're tougher than you think!",
     "Hold it, hold it, hold it!",
