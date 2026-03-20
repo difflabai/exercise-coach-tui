@@ -406,14 +406,43 @@ def build_active_panel(
     return Panel("\n".join(lines), title="Current", border_style="cyan", expand=True)
 
 
-def build_progress_bar(exercises: list[Exercise]) -> str:
+def estimate_remaining(exercises: list[Exercise], rest_seconds: int, avg_rep_set: float = 30.0) -> int:
+    """Estimate seconds remaining. Uses actual average for rep-based sets when available."""
+    remaining = 0
+    total_remaining_sets = 0
+    for ex in exercises:
+        sets_left = ex.total_sets - ex.completed_sets
+        if sets_left <= 0:
+            continue
+        if ex.timed:
+            remaining += sets_left * (ex.reps + 3)  # hold + 3s countdown
+        else:
+            remaining += int(sets_left * avg_rep_set)
+        total_remaining_sets += sets_left
+    # Add rest between remaining sets (one fewer rest than sets)
+    if total_remaining_sets > 1:
+        remaining += (total_remaining_sets - 1) * rest_seconds
+    return remaining
+
+
+def format_eta(seconds: int) -> str:
+    if seconds <= 0:
+        return "done"
+    minutes, secs = divmod(seconds, 60)
+    if minutes > 0:
+        return f"{minutes}m {secs:02d}s"
+    return f"{secs}s"
+
+
+def build_progress_bar(exercises: list[Exercise], rest_seconds: int = 75, avg_rep_set: float = 30.0) -> str:
     total = sum(e.total_sets for e in exercises)
     done = sum(e.completed_sets for e in exercises)
     pct = done / total * 100 if total else 100
     bar_len = 30
     filled = int(bar_len * done / total) if total else bar_len
     bar = "█" * filled + "░" * (bar_len - filled)
-    return f"[bold cyan]Progress:[/bold cyan] {bar} {done}/{total} sets ({pct:.0f}%)"
+    eta = format_eta(estimate_remaining(exercises, rest_seconds, avg_rep_set))
+    return f"[bold cyan]Progress:[/bold cyan] {bar} {done}/{total} sets ({pct:.0f}%)  ⏱ ETA: {eta}"
 
 
 # ---------------------------------------------------------------------------
@@ -427,6 +456,7 @@ def rest_timer(
     live: Live,
     ex: Exercise,
     set_num: int,
+    avg_rep_set: float = 30.0,
 ) -> None:
     """Countdown rest timer. Enter to skip. Voice nags when overtime."""
     say(random.choice(REST_MESSAGES))
@@ -462,7 +492,7 @@ def rest_timer(
             panel = build_active_panel(
                 ex, set_num, status="Resting...", timer_text=timer_text, timer_style=timer_style
             )
-            progress_text = build_progress_bar(exercises)
+            progress_text = build_progress_bar(exercises, rest_seconds, avg_rep_set)
 
             layout = Table.grid(expand=True)
             layout.add_row(overview)
@@ -487,9 +517,11 @@ def rest_timer(
 def timed_hold(
     exercises: list[Exercise],
     current_idx: int,
+    rest_seconds: int,
     live: Live,
     ex: Exercise,
     set_num: int,
+    avg_rep_set: float = 30.0,
 ) -> None:
     """Run a timed hold with voice cues."""
     duration = ex.reps
@@ -501,7 +533,7 @@ def timed_hold(
         panel = build_active_panel(
             ex, set_num, status="Get in position...", timer_text=str(countdown), timer_style="bold yellow"
         )
-        progress_text = build_progress_bar(exercises)
+        progress_text = build_progress_bar(exercises, rest_seconds, avg_rep_set)
         layout = Table.grid(expand=True)
         layout.add_row(overview)
         layout.add_row(panel)
@@ -536,7 +568,7 @@ def timed_hold(
         panel = build_active_panel(
             ex, set_num, status="HOLD!", timer_text=f"{secs_left}s", timer_style="bold green"
         )
-        progress_text = build_progress_bar(exercises)
+        progress_text = build_progress_bar(exercises, rest_seconds, avg_rep_set)
         layout = Table.grid(expand=True)
         layout.add_row(overview)
         layout.add_row(panel)
@@ -565,6 +597,11 @@ def run_workout(exercises: list[Exercise], rest_seconds: int) -> None:
         print_log(exercises)
         return
 
+    rep_set_durations: list[float] = []
+
+    def avg_rep_set() -> float:
+        return sum(rep_set_durations) / len(rep_set_durations) if rep_set_durations else 30.0
+
     with Live(console=console, refresh_per_second=4, screen=True) as live:
         for ex_idx in range(start_idx, len(exercises)):
             ex = exercises[ex_idx]
@@ -581,9 +618,10 @@ def run_workout(exercises: list[Exercise], rest_seconds: int) -> None:
 
                 if ex.timed:
                     # Timed hold
-                    timed_hold(exercises, ex_idx, live, ex, set_num)
+                    timed_hold(exercises, ex_idx, rest_seconds, live, ex, set_num, avg_rep_set())
                 else:
                     # Rep-based: show panel, wait for Enter
+                    set_start = time.time()
                     enter_cbreak()
                     drain_stdin()
                     try:
@@ -594,7 +632,7 @@ def run_workout(exercises: list[Exercise], rest_seconds: int) -> None:
                                 ex, set_num,
                                 status=f"Do {reps_label}, then press Enter",
                             )
-                            progress_text = build_progress_bar(exercises)
+                            progress_text = build_progress_bar(exercises, rest_seconds, avg_rep_set())
                             layout = Table.grid(expand=True)
                             layout.add_row(overview)
                             layout.add_row(panel)
@@ -606,6 +644,7 @@ def run_workout(exercises: list[Exercise], rest_seconds: int) -> None:
                             time.sleep(0.25)
                     finally:
                         restore_terminal()
+                    rep_set_durations.append(time.time() - set_start)
 
                 # Mark set complete
                 ex.completed_sets = set_num
@@ -619,7 +658,7 @@ def run_workout(exercises: list[Exercise], rest_seconds: int) -> None:
                     if is_last_set_of_exercise:
                         play_sound(_SOUND_EXERCISE_COMPLETE)
                         say(f"{ex.name} complete!")
-                    rest_timer(exercises, ex_idx, rest_seconds, live, ex, set_num)
+                    rest_timer(exercises, ex_idx, rest_seconds, live, ex, set_num, avg_rep_set())
 
     say("Workout complete! Great job.")
     console.print("[bold green]Workout complete![/bold green]\n")
