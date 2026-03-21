@@ -6,9 +6,9 @@ Supplementary TUI for [ai-health](https://github.com/difflabai/ai-health) — an
 
 ## Creating a cassette
 
-The coach reads structured JSON "cassette" files that describe a workout session. Use the `exercise-coach.skill` to generate a cassette from your workout plan:
+The coach reads structured JSON "cassette" files that describe a workout session. Use the [`exercise-coach.skill`](https://github.com/difflabai/exercise-coach-tui/blob/master/exercise-coach.skill) to generate a cassette from your workout plan:
 
-1. Install the skill in Claude Code
+1. [Download the skill](https://github.com/difflabai/exercise-coach-tui/raw/master/exercise-coach.skill) and install it in Claude Code
 2. Ask Claude to create a cassette for your workout — it will produce a JSON session file
 3. Feed the cassette to the coach TUI
 
