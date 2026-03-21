@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Workout Coach TUI — interactive terminal workout companion with voice coaching."""
+"""Workout Coach TUI — cassette-player architecture for structured workout sessions."""
 
 import argparse
+import hashlib
 import json
 import os
-import random
 import re
 import select
 import subprocess
@@ -19,27 +19,106 @@ from rich.console import Console
 from rich.live import Live
 from rich.table import Table
 from rich.panel import Panel
-from rich.progress import BarColumn, Progress, TextColumn
-from rich.layout import Layout
 from rich.text import Text
 from rich import box
 
 # ---------------------------------------------------------------------------
-# Data model
+# Constants
 # ---------------------------------------------------------------------------
 
 STATE_FILE = Path(__file__).parent / ".workout_state.json"
 STALE_HOURS = 4
+
+OVERTIME_NAGS = [
+    "Rest is over, let's go.",
+    "Time's up.",
+    "Clock's done, you're not.",
+    "Let's move.",
+]
+
+# ---------------------------------------------------------------------------
+# Cassette data model
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class SetData:
+    reps: int  # target reps or seconds
+    actual_reps: int | None = None
+    failure: bool = False
+
+
+@dataclass
+class ExerciseData:
+    name: str
+    load: str
+    timed: bool
+    sets: list[SetData] = field(default_factory=list)
+
+
+@dataclass
+class TimedCue:
+    at_seconds: int
+    line: str
+
+
+@dataclass
+class Group:
+    type: str  # "straight", "superset", "circuit"
+    rounds: int
+    rest: int  # resolved (group.rest or meta.rest_default)
+    exercises: list[ExerciseData] = field(default_factory=list)
+    voice_intro: str | None = None
+    voice_round_complete: list[str] = field(default_factory=list)
+    voice_group_complete: str | None = None
+    voice_during_set: list[list[TimedCue]] = field(default_factory=list)
+    skipped: bool = False
+
+
+@dataclass
+class Phase:
+    type: str  # "warmup", "main", "cooldown"
+    voice_intro: str | None = None
+    groups: list[Group] = field(default_factory=list)
+
+
+@dataclass
+class ContextExercise:
+    name: str
+    note: str
+    voice: str | None = None
+
+
+@dataclass
+class Cassette:
+    version: str
+    meta: dict
+    phases: list[Phase] = field(default_factory=list)
+    context_exercises: list[ContextExercise] = field(default_factory=list)
+    voice_session_intro: str | None = None
+    voice_session_complete: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Legacy data model (for text input backward compat)
+# ---------------------------------------------------------------------------
+
+SET_RE = re.compile(
+    r"(\d+)"           # total sets
+    r"(?:\[(\d+)\])?"  # optional [completed]
+    r"[×x]"            # separator
+    r"(\d+)(s)?"       # reps or seconds
+)
 
 
 @dataclass
 class Exercise:
     name: str
     total_sets: int
-    reps: int  # reps count, or seconds if timed
-    timed: bool  # True if reps actually means seconds (e.g. 40s)
-    weight: str  # "BW", "55 lbs", etc.
-    phase: str  # ignored in output
+    reps: int
+    timed: bool
+    weight: str
+    phase: str
     completed_sets: int = 0
 
     @property
@@ -54,18 +133,6 @@ class Exercise:
         return f"{self.name:<25} {self.total_sets}×{reps_str}{weight_part}"
 
 
-# ---------------------------------------------------------------------------
-# Parsing
-# ---------------------------------------------------------------------------
-
-SET_RE = re.compile(
-    r"(\d+)"           # total sets
-    r"(?:\[(\d+)\])?"  # optional [completed]
-    r"[×x]"            # separator
-    r"(\d+)(s)?"       # reps or seconds
-)
-
-
 def parse_exercise(line: str) -> Exercise | None:
     line = line.strip()
     if not line:
@@ -73,29 +140,20 @@ def parse_exercise(line: str) -> Exercise | None:
     parts = [p.strip() for p in line.split("|")]
     if not parts:
         return None
-
     first = parts[0]
     m = SET_RE.search(first)
     if not m:
         return None
-
     name = first[: m.start()].strip()
     total_sets = int(m.group(1))
     completed = int(m.group(2)) if m.group(2) else 0
     reps = int(m.group(3))
     timed = m.group(4) == "s"
-
     weight = parts[1].strip() if len(parts) > 1 else ""
     phase = parts[2].strip() if len(parts) > 2 else ""
-
     return Exercise(
-        name=name,
-        total_sets=total_sets,
-        reps=reps,
-        timed=timed,
-        weight=weight,
-        phase=phase,
-        completed_sets=completed,
+        name=name, total_sets=total_sets, reps=reps, timed=timed,
+        weight=weight, phase=phase, completed_sets=completed,
     )
 
 
@@ -109,183 +167,111 @@ def parse_workout(text: str) -> list[Exercise]:
 
 
 # ---------------------------------------------------------------------------
-# State persistence
+# Cassette loading
 # ---------------------------------------------------------------------------
 
-def save_state(exercises: list[Exercise]) -> None:
-    data = {
-        "timestamp": time.time(),
-        "exercises": [asdict(e) for e in exercises],
-    }
-    STATE_FILE.write_text(json.dumps(data, indent=2))
+def load_cassette(path: str) -> Cassette:
+    """Load and validate a cassette JSON file."""
+    return load_cassette_from_dict(json.loads(Path(path).read_text()))
 
 
-def load_state() -> tuple[list[Exercise], float] | None:
-    if not STATE_FILE.exists():
-        return None
-    try:
-        data = json.loads(STATE_FILE.read_text())
-        exercises = [Exercise(**e) for e in data["exercises"]]
-        return exercises, data["timestamp"]
-    except (json.JSONDecodeError, KeyError, TypeError):
-        return None
+def load_cassette_from_dict(data: dict) -> Cassette:
+    """Build a Cassette from a parsed JSON dict."""
+    rest_default = data.get("meta", {}).get("rest_default", 75)
+
+    phases = []
+    for phase_data in data.get("phases", []):
+        groups = []
+        for g in phase_data.get("groups", []):
+            rest = g.get("rest") or rest_default
+
+            exercises = []
+            for ex in g["exercises"]:
+                sets = [SetData(reps=s["reps"]) for s in ex.get("sets", [])]
+                # If sets not specified, generate from rounds
+                if not sets:
+                    default_reps = ex.get("reps", 0)
+                    sets = [SetData(reps=default_reps) for _ in range(g.get("rounds", 1))]
+                exercises.append(ExerciseData(
+                    name=ex["name"], load=ex.get("load", ""),
+                    timed=ex.get("timed", False), sets=sets,
+                ))
+
+            timed_cues = []
+            for round_cues in g.get("voice_during_set", []):
+                timed_cues.append([
+                    TimedCue(at_seconds=c["at_seconds"], line=c["line"])
+                    for c in round_cues
+                ])
+
+            groups.append(Group(
+                type=g.get("type", "straight"),
+                rounds=g.get("rounds", 1),
+                rest=rest,
+                exercises=exercises,
+                voice_intro=g.get("voice_intro"),
+                voice_round_complete=g.get("voice_round_complete", []),
+                voice_group_complete=g.get("voice_group_complete"),
+                voice_during_set=timed_cues,
+            ))
+        phases.append(Phase(
+            type=phase_data.get("type", "main"),
+            voice_intro=phase_data.get("voice_intro"),
+            groups=groups,
+        ))
+
+    ctx = [
+        ContextExercise(name=c["name"], note=c["note"], voice=c.get("voice"))
+        for c in data.get("context_exercises", [])
+    ]
+
+    return Cassette(
+        version=data.get("version", "1.0"),
+        meta=data.get("meta", {}),
+        phases=phases,
+        context_exercises=ctx,
+        voice_session_intro=data.get("voice", {}).get("session_intro"),
+        voice_session_complete=data.get("voice", {}).get("session_complete"),
+    )
 
 
-def clear_state() -> None:
-    if STATE_FILE.exists():
-        STATE_FILE.unlink()
+def text_to_cassette(exercises: list[Exercise], rest: int) -> Cassette:
+    """Wrap legacy parsed exercises in a cassette with no voice lines."""
+    groups = []
+    for ex in exercises:
+        groups.append(Group(
+            type="straight",
+            rounds=ex.total_sets,
+            rest=rest,
+            exercises=[ExerciseData(
+                name=ex.name,
+                load=ex.weight,
+                timed=ex.timed,
+                sets=[SetData(reps=ex.reps) for _ in range(ex.total_sets)],
+            )],
+        ))
+    return Cassette(
+        version="1.1",
+        meta={"date": "", "title": "Workout", "rest_default": rest},
+        phases=[Phase(type="main", groups=groups)],
+    )
 
 
-def exercises_match(a: list[Exercise], b: list[Exercise]) -> bool:
-    """Check if two exercise lists describe the same workout (ignoring progress)."""
-    if len(a) != len(b):
-        return False
-    for x, y in zip(a, b):
-        if (x.name, x.total_sets, x.reps, x.timed) != (y.name, y.total_sets, y.reps, y.timed):
-            return False
-    return True
+def cassette_content_hash(path: str) -> str:
+    """SHA256 of the cassette file contents for state verification."""
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
 # ---------------------------------------------------------------------------
-# Voice coaching (non-blocking macOS `say`)
+# Sound effects
 # ---------------------------------------------------------------------------
-
-HOLD_MESSAGES = [
-    "You're doing great, keep holding!",
-    "Stay strong, don't give up!",
-    "Breathe through it!",
-    "Remember to breathe!",
-    "Deep breaths into the stomach!",
-    "Almost there, keep pushing!",
-    "You're tougher than you think!",
-    "Hold it, hold it, hold it!",
-    "This is where champions are made!",
-    "Pain is temporary, pride is forever!",
-    "Squeeze harder, let's go!",
-    "You've got this, stay tight!",
-    "Mind over matter, keep going!",
-    "Every second counts, stay in it!",
-    "Don't quit on me now!",
-    "That's it, right there, perfect form!",
-    "Embrace the burn!",
-    "Your muscles are screaming but your spirit is louder!",
-    "If it was easy, everyone would do it!",
-    "Gravity is optional, you decide!",
-    "I've seen statues with worse form than you!",
-    "Pretend the floor is lava!",
-    "Your future self is thanking you right now!",
-    "That shake means it's working!",
-    "Channel your inner superhero!",
-    "You are literally a machine right now!",
-    "Nothing can stop you, nothing!",
-    "Who needs comfort anyway?",
-    "This is your moment, own it!",
-    "Breathe deep, you beautiful beast!",
-    "Steel yourself, you're almost through!",
-    "Quitting is not in your vocabulary!",
-    "You're built different, prove it!",
-    "The burn is just your muscles applauding!",
-]
-
-REST_MESSAGES = [
-    "Nice work on that set!",
-    "Shake it out, you earned this rest.",
-    "Great effort, keep it up!",
-    "Solid set, stay focused.",
-    "You're crushing it today!",
-    "Way to push through!",
-    "That looked strong!",
-    "Recover and reload.",
-    "One step closer to the finish!",
-    "Enjoy the break, next set's gonna be even better.",
-    "You're making progress, keep showing up!",
-    "Take a breath, you've earned it.",
-    "Beast mode activated!",
-    "Respect the rest, then attack the next set.",
-    "Looking good, keep that energy!",
-    "That set didn't stand a chance!",
-    "You just made that look easy!",
-    "Your muscles don't know what hit them!",
-    "If that set was a test, you just aced it!",
-    "Somebody call the fire department, because you are on fire!",
-    "Rest up champ, the next round awaits!",
-    "You're not just working out, you're leveling up!",
-    "Hydrate, ventilate, dominate!",
-    "That was disgusting. Disgustingly good!",
-    "The weights are afraid of you now!",
-    "You're making gains and taking names!",
-    "Catch your breath, legend!",
-    "The couch misses you but you don't miss it!",
-    "Quick break, then we go again. You ready?",
-    "Your body is a temple and you're renovating!",
-    "Somewhere, a gym bro just nodded in respect!",
-    "Another set in the bank. Interest is compounding!",
-]
-
-GO_MESSAGES = [
-    "Go!",
-    "Let's go!",
-    "Send it!",
-    "Get after it!",
-    "Unleash!",
-    "Attack!",
-    "Fire it up!",
-    "Here we go!",
-    "Light it up!",
-    "Now!",
-]
-
-DONE_MESSAGES = [
-    "Done!",
-    "Boom!",
-    "Nailed it!",
-    "That's a wrap!",
-    "Money!",
-    "And relax!",
-    "Crushed it!",
-    "Beautiful!",
-    "Drop it!",
-    "Finished!",
-]
-
-OVERTIME_MESSAGES = [
-    "Time's up, let's go!",
-    "Clock's run out, wrap it up!",
-    "You're on borrowed time!",
-    "Overtime! Finish strong!",
-    "That's time! Move it!",
-    "The buzzer went off, let's go!",
-]
-
-EXERCISE_COMPLETE_MESSAGES = [
-    "{name} complete!",
-    "{name} destroyed!",
-    "{name}, done and dusted!",
-    "{name} demolished!",
-    "{name} in the books!",
-    "{name}, checked off!",
-    "Say goodbye to {name}!",
-]
-
-WORKOUT_COMPLETE_MESSAGES = [
-    "Workout complete! Great job.",
-    "That's a wrap! You absolutely killed it.",
-    "Done! Go eat something, you've earned it.",
-    "Workout finished! You're a machine.",
-    "All done! The gym fears you now.",
-    "Complete! Time to flex in the mirror.",
-    "Workout demolished! Champion status unlocked.",
-    "Finished! Your future self just high-fived you.",
-]
-
-_say_proc: subprocess.Popen | None = None
-
 
 def _generate_tone(frequency: int, duration_ms: int, volume: float = 0.5) -> bytes:
     """Generate a WAV tone in memory. Returns raw WAV bytes."""
     import struct
     import wave
     import io
+    import math
     sample_rate = 44100
     n_samples = int(sample_rate * duration_ms / 1000)
     buf = io.BytesIO()
@@ -293,7 +279,6 @@ def _generate_tone(frequency: int, duration_ms: int, volume: float = 0.5) -> byt
         wf.setnchannels(1)
         wf.setsampwidth(2)
         wf.setframerate(sample_rate)
-        import math
         frames = b"".join(
             struct.pack("<h", int(volume * 32767 * math.sin(2 * math.pi * frequency * i / sample_rate)))
             for i in range(n_samples)
@@ -304,11 +289,9 @@ def _generate_tone(frequency: int, duration_ms: int, volume: float = 0.5) -> byt
 
 def _generate_reward_tone() -> bytes:
     """A short rising two-note chime for set completion."""
-    import io
-    tone1 = _generate_tone(880, 120, 0.4)   # A5
-    tone2 = _generate_tone(1175, 200, 0.4)  # D6
-    # Concatenate by appending raw audio data from tone2 onto tone1
-    import wave
+    import io, wave
+    tone1 = _generate_tone(880, 120, 0.4)
+    tone2 = _generate_tone(1175, 200, 0.4)
     buf = io.BytesIO()
     with wave.open(io.BytesIO(tone1), "rb") as w1, wave.open(io.BytesIO(tone2), "rb") as w2:
         with wave.open(buf, "wb") as out:
@@ -321,14 +304,13 @@ def _generate_reward_tone() -> bytes:
 
 
 def _generate_exercise_complete_tone() -> bytes:
-    """A three-note ascending chime for exercise completion."""
-    import io
+    """A three-note ascending chime for exercise/group completion."""
+    import io, wave
     tones = [
-        _generate_tone(784, 100, 0.4),   # G5
-        _generate_tone(988, 100, 0.4),   # B5
-        _generate_tone(1319, 250, 0.4),  # E6
+        _generate_tone(784, 100, 0.4),
+        _generate_tone(988, 100, 0.4),
+        _generate_tone(1319, 250, 0.4),
     ]
-    import wave
     buf = io.BytesIO()
     with wave.open(buf, "wb") as out:
         out.setnchannels(1)
@@ -340,26 +322,26 @@ def _generate_exercise_complete_tone() -> bytes:
     return buf.getvalue()
 
 
-# Pre-generate sounds at import time
 _SOUND_SET_COMPLETE = _generate_reward_tone()
-_SOUND_EXERCISE_COMPLETE = _generate_exercise_complete_tone()
+_SOUND_GROUP_COMPLETE = _generate_exercise_complete_tone()
+
+# ---------------------------------------------------------------------------
+# Voice
+# ---------------------------------------------------------------------------
+
+_say_proc: subprocess.Popen | None = None
 
 
 def play_sound(sound_data: bytes) -> None:
-    """Play a WAV sound from bytes (non-blocking). Uses afplay on macOS, aplay on Linux."""
+    """Play a WAV sound from bytes (non-blocking)."""
     import tempfile
     try:
         tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
         tmp.write(sound_data)
         tmp.close()
-        # Try afplay (macOS), then aplay (Linux)
         for cmd in (["afplay", tmp.name], ["aplay", "-q", tmp.name]):
             try:
-                subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
+                subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 return
             except FileNotFoundError:
                 continue
@@ -368,29 +350,26 @@ def play_sound(sound_data: bytes) -> None:
 
 
 def say(text: str) -> None:
+    """Non-blocking speech."""
     global _say_proc
     try:
         if _say_proc and _say_proc.poll() is None:
             _say_proc.terminate()
         _say_proc = subprocess.Popen(
-            ["say", text],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            ["say", text], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
     except FileNotFoundError:
-        pass  # not on macOS
+        pass
 
 
 def say_sync(text: str, wait: float = 0) -> None:
-    """Say something and optionally wait after it finishes."""
+    """Blocking speech."""
     global _say_proc
     try:
         if _say_proc and _say_proc.poll() is None:
             _say_proc.terminate()
         _say_proc = subprocess.Popen(
-            ["say", text],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            ["say", text], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
         _say_proc.wait()
         if wait > 0:
@@ -400,15 +379,16 @@ def say_sync(text: str, wait: float = 0) -> None:
             time.sleep(wait)
 
 
-# ---------------------------------------------------------------------------
-# Log output
-# ---------------------------------------------------------------------------
+def speak(line: str | None) -> None:
+    """Say a line if it exists. Skip silently if null/empty."""
+    if line:
+        say(line)
 
-def format_log(exercises: list[Exercise]) -> str:
-    lines = []
-    for ex in exercises:
-        lines.append(ex.log_str(show_progress=False))
-    return "\n".join(lines)
+
+def speak_sync(line: str | None, wait: float = 0) -> None:
+    """Blocking speak with null safety."""
+    if line:
+        say_sync(line, wait)
 
 
 # ---------------------------------------------------------------------------
@@ -453,42 +433,157 @@ def drain_stdin() -> None:
             break
 
 
+def read_key() -> str:
+    """Read a single keypress. Returns the character or 'enter' for newline/CR."""
+    if not stdin_ready():
+        return ""
+    raw = os.read(sys.stdin.fileno(), 1024)
+    if raw in (b"\n", b"\r"):
+        return "enter"
+    return raw.decode("utf-8", errors="ignore").lower()
+
+
+# ---------------------------------------------------------------------------
+# Cassette helpers
+# ---------------------------------------------------------------------------
+
+def all_groups(cassette: Cassette) -> list[tuple[int, int, Group]]:
+    """Yield (phase_idx, group_idx, group) for every group in order."""
+    result = []
+    for pi, phase in enumerate(cassette.phases):
+        for gi, group in enumerate(phase.groups):
+            result.append((pi, gi, group))
+    return result
+
+
+def count_sets(cassette: Cassette) -> tuple[int, int]:
+    """Return (total_sets, completed_sets) across the whole cassette."""
+    total = 0
+    done = 0
+    for phase in cassette.phases:
+        for group in phase.groups:
+            for ex in group.exercises:
+                total += len(ex.sets)
+                done += sum(1 for s in ex.sets if s.actual_reps is not None)
+    return total, done
+
+
+def rounds_completed(group: Group) -> int:
+    """Count how many full rounds are completed in a group."""
+    if not group.exercises:
+        return 0
+    # A round is complete when all exercises have actual_reps for that round index
+    for r in range(group.rounds):
+        for ex in group.exercises:
+            if r >= len(ex.sets) or ex.sets[r].actual_reps is None:
+                return r
+    return group.rounds
+
+
+def is_final_moment(cassette: Cassette, phase_idx: int, group_idx: int, round_idx: int) -> bool:
+    """True if this is the last round of the last group of the last phase."""
+    if phase_idx < len(cassette.phases) - 1:
+        return False
+    phase = cassette.phases[phase_idx]
+    if group_idx < len(phase.groups) - 1:
+        return False
+    group = phase.groups[group_idx]
+    return round_idx >= group.rounds - 1
+
+
+def get_cues_for_round(group: Group, round_idx: int) -> list[TimedCue]:
+    if round_idx < len(group.voice_during_set):
+        return group.voice_during_set[round_idx]
+    return []
+
+
+def speak_round_complete(group: Group, round_idx: int) -> None:
+    if round_idx < len(group.voice_round_complete):
+        speak(group.voice_round_complete[round_idx])
+
+
 # ---------------------------------------------------------------------------
 # TUI rendering
 # ---------------------------------------------------------------------------
 
-def build_overview(exercises: list[Exercise], current_idx: int) -> Table:
+def build_overview(cassette: Cassette, cur_phase: int, cur_group: int) -> Table:
+    """Build the overview table showing all phases, groups, and exercises."""
+    title = cassette.meta.get("title", "Workout")
+    program = cassette.meta.get("program", "")
+    if program:
+        title = f"{title} — {program}"
+
     table = Table(
-        title="Workout",
-        box=box.SIMPLE_HEAVY,
-        show_header=False,
-        pad_edge=False,
-        expand=True,
+        title=title, box=box.SIMPLE_HEAVY, show_header=False,
+        pad_edge=False, expand=True,
     )
     table.add_column("Exercise", ratio=1)
-    for i, ex in enumerate(exercises):
-        text = Text(ex.log_str())
-        if ex.done:
-            text.stylize("dim green")
-        elif i == current_idx:
-            text.stylize("bold white on blue")
-        table.add_row(text)
+
+    for pi, phase in enumerate(cassette.phases):
+        # Phase header
+        table.add_row(Text(f" {phase.type.upper()}", style="bold underline"))
+
+        for gi, group in enumerate(phase.groups):
+            is_current = pi == cur_phase and gi == cur_group
+            n_ex = len(group.exercises)
+            rc = rounds_completed(group)
+
+            for ei, ex in enumerate(group.exercises):
+                reps_str = f"{ex.sets[0].reps}s" if ex.timed else str(ex.sets[0].reps)
+                load_str = f" | {ex.load}" if ex.load else ""
+
+                if group.skipped:
+                    label = f"{ex.name:<25} {group.rounds}[0]×{reps_str}{load_str}"
+                    style = "dim yellow"
+                elif rc >= group.rounds:
+                    label = f"{ex.name:<25} {group.rounds}[{rc}]×{reps_str}{load_str}"
+                    style = "dim green"
+                elif is_current:
+                    label = f"{ex.name:<25} {group.rounds}[{rc}]×{reps_str}{load_str}"
+                    style = "bold white on blue"
+                else:
+                    label = f"{ex.name:<25} {group.rounds}×{reps_str}{load_str}"
+                    style = ""
+
+                # Superset/circuit connectors
+                prefix = "  "
+                if n_ex > 1:
+                    if ei == 0:
+                        prefix = "  ┌ "
+                    elif ei == n_ex - 1:
+                        prefix = "  └ "
+                    else:
+                        prefix = "  ├ "
+                else:
+                    prefix = "    "
+
+                text = Text(f"{prefix}{label}")
+                if style:
+                    text.stylize(style)
+                table.add_row(text)
+
+        table.add_row(Text(""))  # spacing between phases
+
+    # Context exercises
+    if cassette.context_exercises:
+        table.add_row(Text(" ── Context ──", style="dim"))
+        for ctx in cassette.context_exercises:
+            table.add_row(Text(f"    {ctx.name}: {ctx.note}", style="dim"))
+
     return table
 
 
-def build_active_panel(
-    ex: Exercise,
-    set_num: int,
-    status: str = "",
-    timer_text: str = "",
-    timer_style: str = "bold white",
+def build_active_panel_straight(
+    ex: ExerciseData, round_idx: int, total_rounds: int,
+    status: str = "", timer_text: str = "", timer_style: str = "bold white",
 ) -> Panel:
+    """Active panel for straight sets (single exercise group)."""
     lines: list[str] = []
-    reps_label = f"{ex.reps}s hold" if ex.timed else f"{ex.reps} reps"
+    reps_label = f"{ex.sets[round_idx].reps}s hold" if ex.timed else f"{ex.sets[round_idx].reps} reps"
     lines.append(f"[bold]{ex.name}[/bold]")
-    if ex.weight:
-        lines.append(f"Weight: {ex.weight}")
-    lines.append(f"Set {set_num} of {ex.total_sets}  •  {reps_label}")
+    if ex.load:
+        lines.append(f"Weight: {ex.load}")
+    lines.append(f"Round {round_idx + 1} of {total_rounds}  •  {reps_label}")
     if status:
         lines.append(f"\n{status}")
     if timer_text:
@@ -496,23 +591,53 @@ def build_active_panel(
     return Panel("\n".join(lines), title="Current", border_style="cyan", expand=True)
 
 
-def estimate_remaining(exercises: list[Exercise], rest_seconds: int, avg_rep_set: float = 30.0) -> int:
-    """Estimate seconds remaining. Uses actual average for rep-based sets when available."""
-    remaining = 0
-    total_remaining_sets = 0
-    for ex in exercises:
-        sets_left = ex.total_sets - ex.completed_sets
-        if sets_left <= 0:
-            continue
-        if ex.timed:
-            remaining += sets_left * (ex.reps + 3)  # hold + 3s countdown
+def build_active_panel_superset(
+    group: Group, round_idx: int, active_ex_idx: int,
+    status: str = "", timer_text: str = "", timer_style: str = "bold white",
+) -> Panel:
+    """Active panel for supersets/circuits showing all exercises with markers."""
+    lines: list[str] = []
+    for ei, ex in enumerate(group.exercises):
+        reps_label = f"{ex.sets[round_idx].reps}s" if ex.timed else f"{ex.sets[round_idx].reps} reps"
+        load_str = f"  •  {ex.load}" if ex.load else ""
+        if ei < active_ex_idx:
+            marker = "✓"
+        elif ei == active_ex_idx:
+            marker = "►"
         else:
-            remaining += int(sets_left * avg_rep_set)
-        total_remaining_sets += sets_left
-    # Add rest between remaining sets (one fewer rest than sets)
-    if total_remaining_sets > 1:
-        remaining += (total_remaining_sets - 1) * rest_seconds
-    return remaining
+            marker = " "
+        lines.append(f"{marker} {ex.name}  •  {reps_label}{load_str}")
+    if status:
+        lines.append(f"\n{status}")
+    if timer_text:
+        lines.append(f"\n[{timer_style}]{timer_text}[/{timer_style}]")
+    title = f"Superset (Round {round_idx + 1} of {group.rounds})" if group.type == "superset" else f"Circuit (Round {round_idx + 1} of {group.rounds})"
+    return Panel("\n".join(lines), title=title, border_style="cyan", expand=True)
+
+
+def build_active_panel(
+    cassette: Cassette, group: Group, ex: ExerciseData,
+    round_idx: int, ex_idx: int,
+    status: str = "", timer_text: str = "", timer_style: str = "bold white",
+) -> Panel:
+    """Route to the right panel type based on group structure."""
+    if len(group.exercises) == 1:
+        return build_active_panel_straight(ex, round_idx, group.rounds, status, timer_text, timer_style)
+    return build_active_panel_superset(group, round_idx, ex_idx, status, timer_text, timer_style)
+
+
+def build_rest_panel(rest_seconds: int, remaining: float, overtime: bool) -> Panel:
+    """Panel shown during rest periods."""
+    if overtime:
+        ot_secs = int(-remaining)
+        timer_text = f"OVERTIME +{ot_secs}s  (press Enter to continue)"
+        timer_style = "bold red"
+    else:
+        secs_left = int(remaining) + 1
+        timer_text = f"{secs_left}s remaining  (Enter to skip rest)"
+        timer_style = "bold yellow"
+    content = f"Resting...\n\n[{timer_style}]{timer_text}[/{timer_style}]"
+    return Panel(content, title="Rest", border_style="yellow", expand=True)
 
 
 def format_eta(seconds: int) -> str:
@@ -524,15 +649,166 @@ def format_eta(seconds: int) -> str:
     return f"{secs}s"
 
 
-def build_progress_bar(exercises: list[Exercise], rest_seconds: int = 75, avg_rep_set: float = 30.0) -> str:
-    total = sum(e.total_sets for e in exercises)
-    done = sum(e.completed_sets for e in exercises)
+def estimate_remaining(cassette: Cassette, avg_rep_set: float = 30.0) -> int:
+    """Estimate seconds remaining based on cassette state."""
+    remaining = 0
+    remaining_sets = 0
+    rest_total = 0
+    for phase in cassette.phases:
+        for group in phase.groups:
+            if group.skipped:
+                continue
+            for ex in group.exercises:
+                for s in ex.sets:
+                    if s.actual_reps is None:
+                        if ex.timed:
+                            remaining += s.reps + 3  # hold + countdown
+                        else:
+                            remaining += int(avg_rep_set)
+                        remaining_sets += 1
+            # Estimate rest for remaining rounds
+            rc = rounds_completed(group)
+            rounds_left = group.rounds - rc
+            if rounds_left > 0:
+                rest_total += (rounds_left - 1) * group.rest
+    remaining += rest_total
+    return remaining
+
+
+def build_progress_bar(cassette: Cassette, avg_rep_set: float = 30.0) -> str:
+    total, done = count_sets(cassette)
     pct = done / total * 100 if total else 100
     bar_len = 30
     filled = int(bar_len * done / total) if total else bar_len
     bar = "█" * filled + "░" * (bar_len - filled)
-    eta = format_eta(estimate_remaining(exercises, rest_seconds, avg_rep_set))
+    eta = format_eta(estimate_remaining(cassette, avg_rep_set))
     return f"[bold cyan]Progress:[/bold cyan] {bar} {done}/{total} sets ({pct:.0f}%)  ⏱ ETA: {eta}"
+
+
+def render_layout(live: Live, overview: Table, panel: Panel, progress_text: str) -> None:
+    """Compose and push a full screen update."""
+    layout = Table.grid(expand=True)
+    layout.add_row(overview)
+    layout.add_row(panel)
+    layout.add_row(Text.from_markup(progress_text))
+    live.update(layout)
+
+
+# ---------------------------------------------------------------------------
+# State persistence
+# ---------------------------------------------------------------------------
+
+def save_state(cassette: Cassette, position: dict, cassette_path: str | None = None) -> None:
+    """Save current playback state."""
+    groups_state = []
+    for pi, phase in enumerate(cassette.phases):
+        for gi, group in enumerate(phase.groups):
+            sets_data = []
+            for ex in group.exercises:
+                ex_sets = []
+                for s in ex.sets:
+                    ex_sets.append({
+                        "actual_reps": s.actual_reps,
+                        "failure": s.failure,
+                    })
+                sets_data.append(ex_sets)
+            groups_state.append({
+                "phase_idx": pi,
+                "group_idx": gi,
+                "skipped": group.skipped,
+                "rounds_completed": rounds_completed(group),
+                "sets": sets_data,
+            })
+
+    data = {
+        "timestamp": time.time(),
+        "cassette_hash": cassette_content_hash(cassette_path) if cassette_path else "",
+        "position": position,
+        "groups_state": groups_state,
+    }
+    STATE_FILE.write_text(json.dumps(data, indent=2))
+
+
+def load_state_data() -> dict | None:
+    """Load raw state dict from file."""
+    if not STATE_FILE.exists():
+        return None
+    try:
+        return json.loads(STATE_FILE.read_text())
+    except (json.JSONDecodeError, KeyError, TypeError):
+        return None
+
+
+def apply_state(cassette: Cassette, state: dict) -> dict:
+    """Apply saved state to a cassette. Returns the resume position."""
+    groups_state = state.get("groups_state", [])
+    flat_groups = all_groups(cassette)
+
+    for gs in groups_state:
+        pi, gi = gs["phase_idx"], gs["group_idx"]
+        # Find matching group
+        for fpi, fgi, group in flat_groups:
+            if fpi == pi and fgi == gi:
+                group.skipped = gs.get("skipped", False)
+                sets_data = gs.get("sets", [])
+                for ei, ex in enumerate(group.exercises):
+                    if ei < len(sets_data):
+                        for ri, s_data in enumerate(sets_data[ei]):
+                            if ri < len(ex.sets):
+                                ex.sets[ri].actual_reps = s_data.get("actual_reps")
+                                ex.sets[ri].failure = s_data.get("failure", False)
+                break
+
+    return state.get("position", {"phase_idx": 0, "group_idx": 0, "round_idx": 0})
+
+
+def clear_state() -> None:
+    if STATE_FILE.exists():
+        STATE_FILE.unlink()
+
+
+# ---------------------------------------------------------------------------
+# Log output
+# ---------------------------------------------------------------------------
+
+def format_exercise_log(ex: ExerciseData, group: Group) -> str:
+    reps_str = f"{ex.sets[0].reps}s" if ex.timed else str(ex.sets[0].reps)
+    load_str = f" | {ex.load}" if ex.load else ""
+    program = ""  # program info lives in meta, not per-exercise
+
+    if group.skipped:
+        return f"{ex.name:<25} {group.rounds}[0]×{reps_str}{load_str}"
+
+    failures = [(i, s) for i, s in enumerate(ex.sets) if s.failure]
+    completed_count = sum(1 for s in ex.sets if s.actual_reps is not None)
+
+    if failures:
+        fail_idx, fail_set = failures[0]
+        fail_reps = fail_set.actual_reps or 0
+        return (
+            f"{ex.name:<25} {group.rounds}[{fail_idx}]×{reps_str}"
+            f" - failed at {fail_reps} on set {fail_idx + 1}{load_str}"
+        )
+
+    if completed_count >= group.rounds:
+        return f"{ex.name:<25} {group.rounds}×{reps_str}{load_str}"
+
+    return f"{ex.name:<25} {group.rounds}[{completed_count}]×{reps_str}{load_str}"
+
+
+def render_log(cassette: Cassette) -> str:
+    lines = []
+    for ctx in cassette.context_exercises:
+        lines.append(f"{ctx.name:<25} — (see notes)")
+    for phase in cassette.phases:
+        for group in phase.groups:
+            for ex in group.exercises:
+                lines.append(format_exercise_log(ex, group))
+    return "\n".join(lines)
+
+
+def print_log(cassette: Cassette) -> None:
+    print("\n" + render_log(cassette) + "\n")
 
 
 # ---------------------------------------------------------------------------
@@ -540,19 +816,12 @@ def build_progress_bar(exercises: list[Exercise], rest_seconds: int = 75, avg_re
 # ---------------------------------------------------------------------------
 
 def rest_timer(
-    exercises: list[Exercise],
-    current_idx: int,
-    rest_seconds: int,
-    live: Live,
-    ex: Exercise,
-    set_num: int,
-    avg_rep_set: float = 30.0,
-) -> None:
-    """Countdown rest timer. Enter to skip. Voice nags when overtime."""
-    say(random.choice(REST_MESSAGES))
+    cassette: Cassette, cur_phase: int, cur_group: int,
+    rest_seconds: int, live: Live, avg_rep_set: float = 30.0,
+) -> str:
+    """Countdown rest timer. Returns 'skip_group' if s pressed, else 'done'."""
     start = time.time()
-    nag_interval = 15
-    nagged_at = 0
+    nag_count = 0
 
     enter_cbreak()
     drain_stdin()
@@ -565,39 +834,27 @@ def rest_timer(
 
             if overtime:
                 overtime_secs = int(-remaining)
-                timer_text = f"OVERTIME +{overtime_secs}s  (press Enter to continue)"
-                timer_style = "bold red"
-                if overtime_secs >= nag_interval and overtime_secs // nag_interval > nagged_at:
-                    nagged_at = overtime_secs // nag_interval
-                    say(random.choice(OVERTIME_MESSAGES))
-            else:
-                secs_left = int(remaining) + 1
-                timer_text = f"Rest: {secs_left}s remaining  (press Enter to skip)"
-                timer_style = "bold yellow"
-                if remaining <= 0.5 and nagged_at == 0:
-                    nagged_at = -1
-                    say(random.choice(OVERTIME_MESSAGES))
+                if overtime_secs >= 15 and overtime_secs // 15 > nag_count:
+                    nag_count = overtime_secs // 15
+                    say(OVERTIME_NAGS[nag_count % len(OVERTIME_NAGS)])
 
-            overview = build_overview(exercises, current_idx)
-            panel = build_active_panel(
-                ex, set_num, status="Resting...", timer_text=timer_text, timer_style=timer_style
-            )
-            progress_text = build_progress_bar(exercises, rest_seconds, avg_rep_set)
+            overview = build_overview(cassette, cur_phase, cur_group)
+            panel = build_rest_panel(rest_seconds, remaining, overtime)
+            progress_text = build_progress_bar(cassette, avg_rep_set)
+            render_layout(live, overview, panel, progress_text)
 
-            layout = Table.grid(expand=True)
-            layout.add_row(overview)
-            layout.add_row(panel)
-            layout.add_row(Text.from_markup(progress_text))
-
-            live.update(layout)
-
-            if stdin_ready():
-                os.read(sys.stdin.fileno(), 1024)
+            key = read_key()
+            if key == "enter":
                 break
+            elif key == "s":
+                drain_stdin()
+                return "skip_group"
 
             time.sleep(0.25)
     finally:
         restore_terminal()
+
+    return "done"
 
 
 # ---------------------------------------------------------------------------
@@ -605,86 +862,123 @@ def rest_timer(
 # ---------------------------------------------------------------------------
 
 def timed_hold(
-    exercises: list[Exercise],
-    current_idx: int,
-    rest_seconds: int,
-    live: Live,
-    ex: Exercise,
-    set_num: int,
-    avg_rep_set: float = 30.0,
-) -> None:
-    """Run a timed hold with voice cues."""
-    duration = ex.reps
+    cassette: Cassette, cur_phase: int, cur_group: int,
+    group: Group, ex: ExerciseData, round_idx: int, ex_idx: int,
+    live: Live, avg_rep_set: float = 30.0,
+) -> str:
+    """Run a timed hold. Returns 'skip_group' if s pressed, else 'done'."""
+    duration = ex.sets[round_idx].reps
+    cues = get_cues_for_round(group, round_idx)
 
     # Get in position
     say_sync("Get in position")
     for countdown in range(3, 0, -1):
-        overview = build_overview(exercises, current_idx)
+        overview = build_overview(cassette, cur_phase, cur_group)
         panel = build_active_panel(
-            ex, set_num, status="Get in position...", timer_text=str(countdown), timer_style="bold yellow"
+            cassette, group, ex, round_idx, ex_idx,
+            status="Get in position...", timer_text=str(countdown), timer_style="bold yellow",
         )
-        progress_text = build_progress_bar(exercises, rest_seconds, avg_rep_set)
-        layout = Table.grid(expand=True)
-        layout.add_row(overview)
-        layout.add_row(panel)
-        layout.add_row(Text.from_markup(progress_text))
-        live.update(layout)
+        progress_text = build_progress_bar(cassette, avg_rep_set)
+        render_layout(live, overview, panel, progress_text)
         time.sleep(1)
 
-    say(random.choice(GO_MESSAGES))
+    say("Go")
 
-    # Pick two distinct motivational messages for mid and 75% marks
-    hold_msgs = random.sample(HOLD_MESSAGES, min(2, len(HOLD_MESSAGES)))
-    mid_said = False
-    three_quarter_said = False
-
+    cue_idx = 0
     start = time.time()
-    while True:
-        elapsed = time.time() - start
-        remaining = duration - elapsed
-        if remaining <= 0:
-            break
 
-        pct = elapsed / duration
-        if pct >= 0.5 and not mid_said:
-            mid_said = True
-            say(hold_msgs[0])
-        elif pct >= 0.75 and not three_quarter_said:
-            three_quarter_said = True
-            say(hold_msgs[1] if len(hold_msgs) > 1 else hold_msgs[0])
+    enter_cbreak()
+    drain_stdin()
 
-        secs_left = int(remaining) + 1
-        overview = build_overview(exercises, current_idx)
-        panel = build_active_panel(
-            ex, set_num, status="HOLD!", timer_text=f"{secs_left}s", timer_style="bold green"
-        )
-        progress_text = build_progress_bar(exercises, rest_seconds, avg_rep_set)
-        layout = Table.grid(expand=True)
-        layout.add_row(overview)
-        layout.add_row(panel)
-        layout.add_row(Text.from_markup(progress_text))
-        live.update(layout)
-        time.sleep(0.25)
+    try:
+        while True:
+            elapsed = time.time() - start
+            remaining = duration - elapsed
+            if remaining <= 0:
+                break
 
-    say(random.choice(DONE_MESSAGES))
+            # Fire cues at their timestamps
+            if cue_idx < len(cues) and elapsed >= cues[cue_idx].at_seconds:
+                say(cues[cue_idx].line)
+                cue_idx += 1
+
+            secs_left = int(remaining) + 1
+            overview = build_overview(cassette, cur_phase, cur_group)
+            panel = build_active_panel(
+                cassette, group, ex, round_idx, ex_idx,
+                status="HOLD!", timer_text=f"{secs_left}s", timer_style="bold green",
+            )
+            progress_text = build_progress_bar(cassette, avg_rep_set)
+            render_layout(live, overview, panel, progress_text)
+
+            key = read_key()
+            if key == "s":
+                drain_stdin()
+                restore_terminal()
+                return "skip_group"
+
+            time.sleep(0.25)
+    finally:
+        restore_terminal()
+
+    say("Done")
+    return "done"
 
 
 # ---------------------------------------------------------------------------
-# Main workout loop
+# Failure input flow
 # ---------------------------------------------------------------------------
 
-def run_workout(exercises: list[Exercise], rest_seconds: int) -> None:
+def get_failure_reps(
+    cassette: Cassette, cur_phase: int, cur_group: int,
+    group: Group, ex: ExerciseData, round_idx: int, ex_idx: int,
+    target_reps: int, live: Live, avg_rep_set: float = 30.0,
+) -> int:
+    """Prompt for actual reps after failure. Returns clamped rep count."""
+    digits = ""
+    enter_cbreak()
+    drain_stdin()
+    try:
+        while True:
+            display_reps = digits if digits else "_"
+            overview = build_overview(cassette, cur_phase, cur_group)
+            panel = build_active_panel(
+                cassette, group, ex, round_idx, ex_idx,
+                status=f"Reps completed: {display_reps}",
+                timer_text="Type number, then Enter", timer_style="bold yellow",
+            )
+            progress_text = build_progress_bar(cassette, avg_rep_set)
+            render_layout(live, overview, panel, progress_text)
+
+            key = read_key()
+            if key == "enter":
+                break
+            elif key and key.isdigit():
+                digits += key
+            elif key == "\x7f" and digits:  # backspace
+                digits = digits[:-1]
+
+            time.sleep(0.1)
+    finally:
+        restore_terminal()
+
+    actual = int(digits) if digits else 0
+    return min(actual, target_reps)
+
+
+# ---------------------------------------------------------------------------
+# Main playback loop
+# ---------------------------------------------------------------------------
+
+def play_cassette(cassette: Cassette, cassette_path: str | None = None) -> None:
+    """Play a cassette from start to finish (or from resume position)."""
     console = Console()
 
-    # Find first incomplete exercise
-    start_idx = 0
-    for i, ex in enumerate(exercises):
-        if not ex.done:
-            start_idx = i
-            break
-    else:
+    # Check if already complete
+    total, done = count_sets(cassette)
+    if total > 0 and done >= total:
         console.print("[green]All exercises already complete![/green]")
-        print_log(exercises)
+        print_log(cassette)
         return
 
     rep_set_durations: list[float] = []
@@ -692,72 +986,145 @@ def run_workout(exercises: list[Exercise], rest_seconds: int) -> None:
     def avg_rep_set() -> float:
         return sum(rep_set_durations) / len(rep_set_durations) if rep_set_durations else 30.0
 
+    speak(cassette.voice_session_intro)
+
     with Live(console=console, refresh_per_second=4, screen=True) as live:
-        for ex_idx in range(start_idx, len(exercises)):
-            ex = exercises[ex_idx]
-            if ex.done:
-                continue
+        # Context exercises
+        if cassette.context_exercises:
+            for ctx in cassette.context_exercises:
+                speak(ctx.voice)
+                overview = build_overview(cassette, -1, -1)
+                ctx_panel = Panel(
+                    f"[bold]{ctx.name}[/bold]\n{ctx.note}\n\nPress Enter to continue",
+                    title="Context", border_style="yellow", expand=True,
+                )
+                progress_text = build_progress_bar(cassette, avg_rep_set())
+                render_layout(live, overview, ctx_panel, progress_text)
+                enter_cbreak()
+                drain_stdin()
+                try:
+                    while True:
+                        if stdin_ready():
+                            os.read(sys.stdin.fileno(), 1024)
+                            break
+                        time.sleep(0.25)
+                finally:
+                    restore_terminal()
 
-            # Announce exercise
-            weight_say = f", {ex.weight}" if ex.weight and ex.weight != "BW" else ""
-            say(f"Next exercise: {ex.name}{weight_say}")
+        # Walk phases → groups → rounds → exercises
+        for pi, phase in enumerate(cassette.phases):
+            speak(phase.voice_intro)
 
-            start_set = ex.completed_sets + 1
-            for set_num in range(start_set, ex.total_sets + 1):
-                say(f"Set {set_num} of {ex.total_sets}")
+            for gi, group in enumerate(phase.groups):
+                if group.skipped:
+                    continue
 
-                if ex.timed:
-                    # Timed hold
-                    timed_hold(exercises, ex_idx, rest_seconds, live, ex, set_num, avg_rep_set())
-                else:
-                    # Rep-based: show panel, wait for Enter
-                    set_start = time.time()
-                    enter_cbreak()
-                    drain_stdin()
-                    try:
-                        while True:
-                            overview = build_overview(exercises, ex_idx)
-                            reps_label = f"{ex.reps} reps"
-                            panel = build_active_panel(
-                                ex, set_num,
-                                status=f"Do {reps_label}, then press Enter",
+                speak(group.voice_intro)
+
+                skip_group = False
+                start_round = rounds_completed(group)
+
+                for round_idx in range(start_round, group.rounds):
+                    if skip_group:
+                        break
+
+                    for ei, ex in enumerate(group.exercises):
+                        if skip_group:
+                            break
+
+                        set_data = ex.sets[round_idx]
+                        if set_data.actual_reps is not None:
+                            continue  # already done (resume)
+
+                        if ex.timed:
+                            result = timed_hold(
+                                cassette, pi, gi, group, ex, round_idx, ei,
+                                live, avg_rep_set(),
                             )
-                            progress_text = build_progress_bar(exercises, rest_seconds, avg_rep_set())
-                            layout = Table.grid(expand=True)
-                            layout.add_row(overview)
-                            layout.add_row(panel)
-                            layout.add_row(Text.from_markup(progress_text))
-                            live.update(layout)
-                            if stdin_ready():
-                                os.read(sys.stdin.fileno(), 1024)
+                            if result == "skip_group":
+                                skip_group = True
                                 break
-                            time.sleep(0.25)
-                    finally:
-                        restore_terminal()
-                    rep_set_durations.append(time.time() - set_start)
+                            set_data.actual_reps = set_data.reps
+                        else:
+                            # Rep-based: show panel, wait for key
+                            set_start = time.time()
+                            key_hint = "Enter = done  •  f = failed  •  s = skip"
+                            enter_cbreak()
+                            drain_stdin()
+                            try:
+                                while True:
+                                    overview = build_overview(cassette, pi, gi)
+                                    panel = build_active_panel(
+                                        cassette, group, ex, round_idx, ei,
+                                        status=key_hint,
+                                    )
+                                    progress_text = build_progress_bar(cassette, avg_rep_set())
+                                    render_layout(live, overview, panel, progress_text)
 
-                # Mark set complete
-                ex.completed_sets = set_num
-                play_sound(_SOUND_SET_COMPLETE)
-                save_state(exercises)
+                                    key = read_key()
+                                    if key == "enter":
+                                        set_data.actual_reps = set_data.reps
+                                        break
+                                    elif key == "f":
+                                        restore_terminal()
+                                        actual = get_failure_reps(
+                                            cassette, pi, gi, group, ex,
+                                            round_idx, ei, set_data.reps,
+                                            live, avg_rep_set(),
+                                        )
+                                        set_data.actual_reps = actual
+                                        set_data.failure = True
+                                        enter_cbreak()
+                                        break
+                                    elif key == "s":
+                                        drain_stdin()
+                                        skip_group = True
+                                        break
 
-                # Rest timer unless last set of last exercise
-                is_last_set_of_exercise = set_num == ex.total_sets
-                is_last_exercise = ex_idx == len(exercises) - 1
-                if not (is_last_set_of_exercise and is_last_exercise):
-                    if is_last_set_of_exercise:
-                        play_sound(_SOUND_EXERCISE_COMPLETE)
-                        say(random.choice(EXERCISE_COMPLETE_MESSAGES).format(name=ex.name))
-                    rest_timer(exercises, ex_idx, rest_seconds, live, ex, set_num, avg_rep_set())
+                                    time.sleep(0.25)
+                            finally:
+                                restore_terminal()
 
-    say(random.choice(WORKOUT_COMPLETE_MESSAGES))
+                            if not skip_group:
+                                rep_set_durations.append(time.time() - set_start)
+
+                        if skip_group:
+                            break
+
+                        # Set complete
+                        play_sound(_SOUND_SET_COMPLETE)
+
+                    if skip_group:
+                        group.skipped = True
+                        say(f"Skipping {group.exercises[0].name}")
+                        save_state(cassette, {"phase_idx": pi, "group_idx": gi, "round_idx": round_idx}, cassette_path)
+                        break
+
+                    # Round complete
+                    speak_round_complete(group, round_idx)
+                    play_sound(_SOUND_SET_COMPLETE)
+                    save_state(cassette, {"phase_idx": pi, "group_idx": gi, "round_idx": round_idx + 1}, cassette_path)
+
+                    # Rest (skip after last round of last group of last phase)
+                    if not is_final_moment(cassette, pi, gi, round_idx):
+                        result = rest_timer(
+                            cassette, pi, gi, group.rest, live, avg_rep_set(),
+                        )
+                        if result == "skip_group":
+                            group.skipped = True
+                            say(f"Skipping {group.exercises[0].name}")
+                            save_state(cassette, {"phase_idx": pi, "group_idx": gi, "round_idx": round_idx + 1}, cassette_path)
+                            break
+
+                # Group complete
+                if not group.skipped:
+                    speak(group.voice_group_complete)
+                    play_sound(_SOUND_GROUP_COMPLETE)
+
+    speak(cassette.voice_session_complete)
     console.print("[bold green]Workout complete![/bold green]\n")
-    print_log(exercises)
+    print_log(cassette)
     clear_state()
-
-
-def print_log(exercises: list[Exercise]) -> None:
-    print("\n" + format_log(exercises) + "\n")
 
 
 # ---------------------------------------------------------------------------
@@ -767,7 +1134,6 @@ def print_log(exercises: list[Exercise]) -> None:
 def read_input(file_path: str | None) -> str:
     if file_path:
         return Path(file_path).read_text()
-
     console = Console(stderr=True)
     console.print(
         "[bold cyan]Paste your workout below, then press Enter on an empty line:[/bold cyan]"
@@ -784,45 +1150,66 @@ def read_input(file_path: str | None) -> str:
     return "\n".join(lines)
 
 
+def parse_input(text: str, rest: int) -> tuple[Cassette, bool]:
+    """Parse input text. Returns (cassette, is_json). Tries JSON first, then text format."""
+    stripped = text.strip()
+    if stripped.startswith("{"):
+        try:
+            data = json.loads(stripped)
+            if "phases" in data:
+                return load_cassette_from_dict(data), True
+        except (json.JSONDecodeError, KeyError, TypeError):
+            pass
+    exercises = parse_workout(text)
+    return text_to_cassette(exercises, rest), False
+
+
 # ---------------------------------------------------------------------------
 # Resume logic
 # ---------------------------------------------------------------------------
 
-def try_resume(parsed: list[Exercise], auto: bool = False) -> list[Exercise]:
+def try_resume(cassette: Cassette, cassette_path: str | None, auto: bool = False) -> dict | None:
+    """Check for saved state and optionally resume. Returns resume position or None."""
     console = Console(stderr=True)
-    result = load_state()
-    if result is None:
-        return parsed
+    state = load_state_data()
+    if state is None:
+        return None
 
-    saved, ts = result
+    ts = state.get("timestamp", 0)
     age_hours = (time.time() - ts) / 3600
 
-    if not auto and not exercises_match(parsed, saved):
-        console.print("[yellow]Saved state doesn't match current workout, starting fresh.[/yellow]")
-        clear_state()
-        return parsed
+    # Verify cassette hash if we have a file path
+    if cassette_path:
+        saved_hash = state.get("cassette_hash", "")
+        current_hash = cassette_content_hash(cassette_path)
+        if saved_hash and saved_hash != current_hash:
+            if not auto:
+                console.print("[yellow]Saved state doesn't match this cassette, starting fresh.[/yellow]")
+            clear_state()
+            return None
 
-    total_done = sum(e.completed_sets for e in saved)
+    # Check if there's any progress
+    groups_state = state.get("groups_state", [])
+    total_done = sum(
+        sum(1 for ex_sets in gs.get("sets", []) for s in ex_sets if s.get("actual_reps") is not None)
+        for gs in groups_state
+    )
     if total_done == 0:
         clear_state()
-        return parsed
+        return None
+
+    total_sets, _ = count_sets(cassette)
 
     if age_hours > STALE_HOURS:
-        console.print(
-            f"[yellow]Found saved state from {age_hours:.1f} hours ago.[/yellow]"
-        )
+        console.print(f"[yellow]Found saved state from {age_hours:.1f} hours ago.[/yellow]")
 
-    done_total = sum(e.total_sets for e in saved)
-    console.print(
-        f"[cyan]Saved progress found: {total_done}/{done_total} sets complete.[/cyan]"
-    )
+    console.print(f"[cyan]Saved progress found: {total_done}/{total_sets} sets complete.[/cyan]")
 
     if auto:
         console.print("[green]Resuming...[/green]")
-        return saved
+        return apply_state(cassette, state)
 
     console.print("[cyan]Resume? (Y/n):[/cyan] ", end="")
-
     try:
         answer = input().strip().lower()
     except EOFError:
@@ -830,10 +1217,10 @@ def try_resume(parsed: list[Exercise], auto: bool = False) -> list[Exercise]:
 
     if answer in ("", "y", "yes"):
         console.print("[green]Resuming...[/green]")
-        return saved
+        return apply_state(cassette, state)
     else:
         clear_state()
-        return parsed
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -842,10 +1229,10 @@ def try_resume(parsed: list[Exercise], auto: bool = False) -> list[Exercise]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Workout Coach TUI")
-    parser.add_argument("file", nargs="?", help="Workout file to read")
-    parser.add_argument("--rest", type=int, default=75, help="Rest seconds between sets (default: 75)")
-    parser.add_argument("--resume", action="store_true", help="Resume last workout without re-entering it")
-    parser.add_argument("--reset", action="store_true", help="Discard saved state and exit")
+    parser.add_argument("file", nargs="?", help="Workout file (.json cassette or .txt)")
+    parser.add_argument("--rest", type=int, default=75, help="Rest seconds (default: 75, overrides cassette default)")
+    parser.add_argument("--resume", action="store_true", help="Resume last workout without prompting")
+    parser.add_argument("--reset", "--restart", action="store_true", help="Discard saved state and exit")
     parser.add_argument("--log", action="store_true", help="Print current saved log and exit")
     args = parser.parse_args()
 
@@ -855,45 +1242,82 @@ def main() -> None:
         return
 
     if args.log:
-        result = load_state()
-        if result:
-            exercises, _ = result
-            print(format_log(exercises))
-        else:
+        state = load_state_data()
+        if not state:
             print("No saved state.")
+            return
+        if not args.file:
+            print("Provide the cassette file: python coach.py workout.json --log", file=sys.stderr)
+            sys.exit(1)
+        if args.file.endswith(".json"):
+            cassette = load_cassette(args.file)
+        else:
+            text = Path(args.file).read_text()
+            cassette, _ = parse_input(text, args.rest)
+        apply_state(cassette, state)
+        print(render_log(cassette))
         return
 
+    cassette_path = None
+
     if args.resume:
-        result = load_state()
-        if result is None:
+        # Pure resume: load state, then we need the cassette file
+        state = load_state_data()
+        if state is None:
             print("No saved state to resume.", file=sys.stderr)
             sys.exit(1)
-        exercises, _ = result
-        total_done = sum(e.completed_sets for e in exercises)
-        if total_done == 0:
-            print("No progress to resume.", file=sys.stderr)
-            clear_state()
+        # Can't fully resume without a cassette file — need one
+        if not args.file:
+            print("Provide the cassette file to resume: python coach.py workout.json --resume", file=sys.stderr)
             sys.exit(1)
+        cassette_path = args.file
+        if args.file.endswith(".json"):
+            cassette = load_cassette(args.file)
+        else:
+            text = Path(args.file).read_text()
+            cassette, _ = parse_input(text, args.rest)
+        position = apply_state(cassette, state)
     else:
         text = read_input(args.file)
-        exercises = parse_workout(text)
+        cassette, is_json = parse_input(text, args.rest)
 
-        if not exercises:
+        if not cassette.phases or not any(g for p in cassette.phases for g in p.groups):
             print("No exercises parsed. Check your input format.", file=sys.stderr)
             sys.exit(1)
 
-        exercises = try_resume(exercises)
+        if args.file and args.file.endswith(".json"):
+            cassette_path = args.file
+
+        # Apply --rest override: always for text input, only when explicitly set for JSON
+        rest_override = not is_json or args.rest != 75
+        if rest_override:
+            for phase in cassette.phases:
+                for group in phase.groups:
+                    group.rest = args.rest
+
+        # Try resume
+        try_resume(cassette, cassette_path)
 
     try:
-        run_workout(exercises, args.rest)
+        play_cassette(cassette, cassette_path)
     except KeyboardInterrupt:
         restore_terminal()
-        save_state(exercises)
-        # Kill any lingering say process
+        if cassette_path:
+            # Find current position from cassette state
+            pos = {"phase_idx": 0, "group_idx": 0, "round_idx": 0}
+            for pi, phase in enumerate(cassette.phases):
+                for gi, group in enumerate(phase.groups):
+                    rc = rounds_completed(group)
+                    if rc < group.rounds and not group.skipped:
+                        pos = {"phase_idx": pi, "group_idx": gi, "round_idx": rc}
+                        break
+            save_state(cassette, pos, cassette_path)
+        else:
+            save_state(cassette, {"phase_idx": 0, "group_idx": 0, "round_idx": 0})
         if _say_proc and _say_proc.poll() is None:
             _say_proc.terminate()
         print("\n\nWorkout paused. Progress saved.\n")
-        print_log(exercises)
+        print_log(cassette)
 
 
 if __name__ == "__main__":
