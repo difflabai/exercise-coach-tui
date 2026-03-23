@@ -476,6 +476,23 @@ def count_sets(cassette: Cassette) -> tuple[int, int]:
     return total, done
 
 
+def undo_last_set(group: Group) -> bool:
+    """Reset the most recently completed set in a group. Returns True if a set was undone."""
+    last_round = -1
+    last_ei = -1
+    for r in range(group.rounds):
+        for ei, ex in enumerate(group.exercises):
+            if r < len(ex.sets) and ex.sets[r].actual_reps is not None:
+                last_round = r
+                last_ei = ei
+    if last_round < 0:
+        return False
+    s = group.exercises[last_ei].sets[last_round]
+    s.actual_reps = None
+    s.failure = False
+    return True
+
+
 def rounds_completed(group: Group) -> int:
     """Count how many full rounds are completed in a group."""
     if not group.exercises:
@@ -638,11 +655,11 @@ def build_rest_panel(rest_seconds: int, remaining: float, overtime: bool) -> Pan
     """Panel shown during rest periods."""
     if overtime:
         ot_secs = int(-remaining)
-        timer_text = f"OVERTIME +{ot_secs}s  (Enter to continue • p to pause)"
+        timer_text = f"OVERTIME +{ot_secs}s  (Enter to continue • b = back • p = pause)"
         timer_style = "bold red"
     else:
         secs_left = int(remaining) + 1
-        timer_text = f"{secs_left}s remaining  (Enter to skip • p to pause)"
+        timer_text = f"{secs_left}s remaining  (Enter to skip • b = back • p = pause)"
         timer_style = "bold yellow"
     content = f"Resting...\n\n[{timer_style}]{timer_text}[/{timer_style}]"
     return Panel(content, title="Rest", border_style="yellow", expand=True)
@@ -899,6 +916,9 @@ def rest_timer(
             elif key == "s":
                 drain_stdin()
                 return "skip_group"
+            elif key == "b":
+                drain_stdin()
+                return "go_back"
             elif key == "p":
                 restore_terminal()
                 paused = pause_screen(live, cassette, cur_phase, cur_group, avg_rep_set)
@@ -975,6 +995,10 @@ def timed_hold(
                 drain_stdin()
                 restore_terminal()
                 return "skip_group"
+            elif key == "b":
+                drain_stdin()
+                restore_terminal()
+                return "go_back"
             elif key == "p":
                 restore_terminal()
                 paused = pause_screen(live, cassette, cur_phase, cur_group, avg_rep_set)
@@ -1098,14 +1122,16 @@ def play_cassette(cassette: Cassette, cassette_path: str | None = None) -> None:
                 speak(group.voice_intro)
 
                 skip_group = False
-                start_round = rounds_completed(group)
+                round_idx = rounds_completed(group)
 
-                for round_idx in range(start_round, group.rounds):
+                while round_idx < group.rounds:
                     if skip_group:
                         break
 
+                    go_back = False
+
                     for ei, ex in enumerate(group.exercises):
-                        if skip_group:
+                        if skip_group or go_back:
                             break
 
                         set_data = ex.sets[round_idx]
@@ -1120,11 +1146,15 @@ def play_cassette(cassette: Cassette, cassette_path: str | None = None) -> None:
                             if result == "skip_group":
                                 skip_group = True
                                 break
+                            if result == "go_back":
+                                undo_last_set(group)
+                                go_back = True
+                                break
                             set_data.actual_reps = set_data.reps
                         else:
                             # Rep-based: show panel, wait for key
                             set_start = time.time()
-                            key_hint = "Enter = done  •  f = failed  •  s = skip  •  p = pause"
+                            key_hint = "Enter = done  •  f = failed  •  s = skip  •  b = back  •  p = pause"
                             enter_cbreak()
                             drain_stdin()
                             try:
@@ -1156,6 +1186,10 @@ def play_cassette(cassette: Cassette, cassette_path: str | None = None) -> None:
                                         drain_stdin()
                                         skip_group = True
                                         break
+                                    elif key == "b":
+                                        if undo_last_set(group):
+                                            go_back = True
+                                        break
                                     elif key == "p":
                                         restore_terminal()
                                         paused = pause_screen(live, cassette, pi, gi, avg_rep_set())
@@ -1170,14 +1204,19 @@ def play_cassette(cassette: Cassette, cassette_path: str | None = None) -> None:
                             finally:
                                 restore_terminal()
 
-                            if not skip_group:
+                            if not skip_group and not go_back:
                                 rep_set_durations.append(time.time() - set_start)
 
-                        if skip_group:
+                        if skip_group or go_back:
                             break
 
                         # Set complete
                         play_sound(_SOUND_SET_COMPLETE)
+
+                    if go_back:
+                        # Recalculate position after undo
+                        round_idx = rounds_completed(group)
+                        continue
 
                     if skip_group:
                         group.skipped = True
@@ -1200,6 +1239,12 @@ def play_cassette(cassette: Cassette, cassette_path: str | None = None) -> None:
                             say(f"Skipping {group.exercises[0].name}")
                             save_state(cassette, {"phase_idx": pi, "group_idx": gi, "round_idx": round_idx + 1}, cassette_path)
                             break
+                        if result == "go_back":
+                            undo_last_set(group)
+                            round_idx = rounds_completed(group)
+                            continue
+
+                    round_idx += 1
 
                 # Group complete
                 if not group.skipped:
