@@ -1169,9 +1169,8 @@ def play_cassette(cassette: Cassette, cassette_path: str | None = None) -> None:
                     continue
 
                 # Transition screen between groups (not before the first unstarted group)
-                is_first_group = (pi == 0 and gi == 0)
                 already_started = rounds_completed(group) > 0
-                if not is_first_group and not already_started:
+                if not already_started:
                     transition_screen(live, cassette, pi, gi, group, avg_rep_set())
                     if group.skipped:
                         continue
