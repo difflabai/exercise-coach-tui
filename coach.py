@@ -743,10 +743,18 @@ def save_state(cassette: Cassette, position: dict, cassette_path: str | None = N
                 "sets": sets_data,
             })
 
+    # Read cassette source so state is self-contained for resume
+    cassette_source = ""
+    if cassette_path:
+        p = Path(cassette_path)
+        if p.exists():
+            cassette_source = p.read_text()
+
     data = {
         "timestamp": time.time(),
         "cassette_hash": cassette_content_hash(cassette_path) if cassette_path else "",
         "cassette_path": str(Path(cassette_path).resolve()) if cassette_path else "",
+        "cassette_source": cassette_source,
         "position": position,
         "groups_state": groups_state,
     }
@@ -1490,15 +1498,19 @@ def main() -> None:
         if not state:
             print("No saved state.")
             return
-        log_file = args.file or state.get("cassette_path", "")
-        if not log_file:
-            print("Provide the cassette file: python coach.py workout.json --log", file=sys.stderr)
-            sys.exit(1)
-        if log_file.endswith(".json"):
-            cassette = load_cassette(log_file)
+        if args.file:
+            text = Path(args.file).read_text()
         else:
-            text = Path(log_file).read_text()
-            cassette, _ = parse_input(text, args.rest)
+            saved_path = state.get("cassette_path", "")
+            source = state.get("cassette_source", "")
+            if saved_path and Path(saved_path).exists():
+                text = Path(saved_path).read_text()
+            elif source:
+                text = source
+            else:
+                print("No saved cassette for log.", file=sys.stderr)
+                sys.exit(1)
+        cassette, _ = parse_input(text, args.rest)
         apply_state(cassette, state)
         print(render_log(cassette))
         return
@@ -1506,39 +1518,47 @@ def main() -> None:
     cassette_path = None
 
     if args.resume:
-        # Pure resume: load state, then we need the cassette file
         state = load_state_data()
         if state is None:
             print("No saved state to resume.", file=sys.stderr)
             sys.exit(1)
-        # Use saved cassette path if no file provided
-        resume_file = args.file or state.get("cassette_path", "")
-        if not resume_file:
-            print("Provide the cassette file to resume: python coach.py workout.json --resume", file=sys.stderr)
-            sys.exit(1)
-        if not Path(resume_file).exists():
-            print(f"Cassette file not found: {resume_file}", file=sys.stderr)
-            sys.exit(1)
-        cassette_path = resume_file
-        if resume_file.endswith(".json"):
-            cassette = load_cassette(resume_file)
+        # Load cassette: from file arg, saved path, or embedded source
+        if args.file:
+            cassette_path = args.file
+            cassette, _ = parse_input(Path(args.file).read_text(), args.rest)
         else:
-            text = Path(resume_file).read_text()
-            cassette, _ = parse_input(text, args.rest)
+            saved_path = state.get("cassette_path", "")
+            source = state.get("cassette_source", "")
+            if saved_path and Path(saved_path).exists():
+                cassette_path = saved_path
+                cassette, _ = parse_input(Path(saved_path).read_text(), args.rest)
+            elif source:
+                cassette, _ = parse_input(source, args.rest)
+            else:
+                print("No saved cassette to resume from.", file=sys.stderr)
+                sys.exit(1)
         position = apply_state(cassette, state)
     else:
         resumed_from_state = False
-        # If no file given, check saved state for a cassette path to resume
+        # If no file given, check saved state to offer resume
         if not args.file:
             state = load_state_data()
-            saved_path = state.get("cassette_path", "") if state else ""
-            if saved_path and Path(saved_path).exists():
-                tmp_cassette = load_cassette(saved_path) if saved_path.endswith(".json") else parse_input(Path(saved_path).read_text(), args.rest)[0]
-                resumed = try_resume(tmp_cassette, saved_path)
-                if resumed is not None:
-                    cassette = tmp_cassette
-                    cassette_path = saved_path
-                    resumed_from_state = True
+            if state:
+                saved_path = state.get("cassette_path", "")
+                source = state.get("cassette_source", "")
+                tmp_cassette = None
+                tmp_path = None
+                if saved_path and Path(saved_path).exists():
+                    tmp_cassette, _ = parse_input(Path(saved_path).read_text(), args.rest)
+                    tmp_path = saved_path
+                elif source:
+                    tmp_cassette, _ = parse_input(source, args.rest)
+                if tmp_cassette:
+                    resumed = try_resume(tmp_cassette, tmp_path)
+                    if resumed is not None:
+                        cassette = tmp_cassette
+                        cassette_path = tmp_path
+                        resumed_from_state = True
 
         if not resumed_from_state:
             text = read_input(args.file)
@@ -1548,7 +1568,7 @@ def main() -> None:
                 print("No exercises parsed. Check your input format.", file=sys.stderr)
                 sys.exit(1)
 
-            if args.file and args.file.endswith(".json"):
+            if args.file:
                 cassette_path = args.file
 
             # Apply --rest override: always for text input, only when explicitly set for JSON
