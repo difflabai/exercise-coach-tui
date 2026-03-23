@@ -7,6 +7,7 @@ import json
 import os
 import re
 import select
+import signal
 import subprocess
 import sys
 import termios
@@ -27,6 +28,11 @@ from rich import box
 # ---------------------------------------------------------------------------
 
 STATE_FILE = Path(__file__).parent / ".workout_state.json"
+
+
+class WorkoutPaused(Exception):
+    """Raised when user presses Ctrl-Z to suspend to shell."""
+    pass
 STALE_HOURS = 4
 
 OVERTIME_NAGS = [
@@ -440,6 +446,8 @@ def read_key() -> str:
     raw = os.read(sys.stdin.fileno(), 1024)
     if raw in (b"\n", b"\r"):
         return "enter"
+    if raw == b"\x1a":
+        return "ctrl-z"
     return raw.decode("utf-8", errors="ignore").lower()
 
 
@@ -630,11 +638,11 @@ def build_rest_panel(rest_seconds: int, remaining: float, overtime: bool) -> Pan
     """Panel shown during rest periods."""
     if overtime:
         ot_secs = int(-remaining)
-        timer_text = f"OVERTIME +{ot_secs}s  (press Enter to continue)"
+        timer_text = f"OVERTIME +{ot_secs}s  (Enter to continue • p to pause)"
         timer_style = "bold red"
     else:
         secs_left = int(remaining) + 1
-        timer_text = f"{secs_left}s remaining  (Enter to skip rest)"
+        timer_text = f"{secs_left}s remaining  (Enter to skip • p to pause)"
         timer_style = "bold yellow"
     content = f"Resting...\n\n[{timer_style}]{timer_text}[/{timer_style}]"
     return Panel(content, title="Rest", border_style="yellow", expand=True)
@@ -812,6 +820,48 @@ def print_log(cassette: Cassette) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Pause
+# ---------------------------------------------------------------------------
+
+def pause_screen(
+    live: Live, cassette: Cassette, cur_phase: int, cur_group: int,
+    avg_rep_set: float = 30.0,
+) -> float:
+    """Show pause overlay. Returns seconds spent paused."""
+    global _say_proc
+    if _say_proc and _say_proc.poll() is None:
+        _say_proc.terminate()
+
+    start = time.time()
+    enter_cbreak()
+    drain_stdin()
+
+    try:
+        while True:
+            overview = build_overview(cassette, cur_phase, cur_group)
+            panel = Panel(
+                Text("PAUSED", style="bold yellow", justify="center"),
+                subtitle="p = resume  •  Ctrl-Z = suspend to shell",
+                border_style="yellow", expand=True, padding=(2, 4),
+            )
+            progress_text = build_progress_bar(cassette, avg_rep_set)
+            render_layout(live, overview, panel, progress_text)
+
+            key = read_key()
+            if key in ("p", "enter"):
+                drain_stdin()
+                break
+            if key == "ctrl-z":
+                raise WorkoutPaused()
+
+            time.sleep(0.25)
+    finally:
+        restore_terminal()
+
+    return time.time() - start
+
+
+# ---------------------------------------------------------------------------
 # Rest timer
 # ---------------------------------------------------------------------------
 
@@ -849,6 +899,15 @@ def rest_timer(
             elif key == "s":
                 drain_stdin()
                 return "skip_group"
+            elif key == "p":
+                restore_terminal()
+                paused = pause_screen(live, cassette, cur_phase, cur_group, avg_rep_set)
+                start += paused
+                enter_cbreak()
+                drain_stdin()
+                continue
+            elif key == "ctrl-z":
+                raise WorkoutPaused()
 
             time.sleep(0.25)
     finally:
@@ -916,6 +975,15 @@ def timed_hold(
                 drain_stdin()
                 restore_terminal()
                 return "skip_group"
+            elif key == "p":
+                restore_terminal()
+                paused = pause_screen(live, cassette, cur_phase, cur_group, avg_rep_set)
+                start += paused
+                enter_cbreak()
+                drain_stdin()
+                continue
+            elif key == "ctrl-z":
+                raise WorkoutPaused()
 
             time.sleep(0.25)
     finally:
@@ -1004,9 +1072,17 @@ def play_cassette(cassette: Cassette, cassette_path: str | None = None) -> None:
                 drain_stdin()
                 try:
                     while True:
-                        if stdin_ready():
-                            os.read(sys.stdin.fileno(), 1024)
+                        key = read_key()
+                        if key == "enter":
                             break
+                        elif key == "p":
+                            restore_terminal()
+                            pause_screen(live, cassette, -1, -1, avg_rep_set())
+                            enter_cbreak()
+                            drain_stdin()
+                            continue
+                        elif key == "ctrl-z":
+                            raise WorkoutPaused()
                         time.sleep(0.25)
                 finally:
                     restore_terminal()
@@ -1048,7 +1124,7 @@ def play_cassette(cassette: Cassette, cassette_path: str | None = None) -> None:
                         else:
                             # Rep-based: show panel, wait for key
                             set_start = time.time()
-                            key_hint = "Enter = done  •  f = failed  •  s = skip"
+                            key_hint = "Enter = done  •  f = failed  •  s = skip  •  p = pause"
                             enter_cbreak()
                             drain_stdin()
                             try:
@@ -1080,6 +1156,15 @@ def play_cassette(cassette: Cassette, cassette_path: str | None = None) -> None:
                                         drain_stdin()
                                         skip_group = True
                                         break
+                                    elif key == "p":
+                                        restore_terminal()
+                                        paused = pause_screen(live, cassette, pi, gi, avg_rep_set())
+                                        set_start += paused
+                                        enter_cbreak()
+                                        drain_stdin()
+                                        continue
+                                    elif key == "ctrl-z":
+                                        raise WorkoutPaused()
 
                                     time.sleep(0.25)
                             finally:
@@ -1298,26 +1383,40 @@ def main() -> None:
         # Try resume
         try_resume(cassette, cassette_path)
 
-    try:
-        play_cassette(cassette, cassette_path)
-    except KeyboardInterrupt:
-        restore_terminal()
-        if cassette_path:
-            # Find current position from cassette state
-            pos = {"phase_idx": 0, "group_idx": 0, "round_idx": 0}
-            for pi, phase in enumerate(cassette.phases):
-                for gi, group in enumerate(phase.groups):
-                    rc = rounds_completed(group)
-                    if rc < group.rounds and not group.skipped:
-                        pos = {"phase_idx": pi, "group_idx": gi, "round_idx": rc}
-                        break
-            save_state(cassette, pos, cassette_path)
-        else:
-            save_state(cassette, {"phase_idx": 0, "group_idx": 0, "round_idx": 0})
-        if _say_proc and _say_proc.poll() is None:
-            _say_proc.terminate()
-        print("\n\nWorkout paused. Progress saved.\n")
-        print_log(cassette)
+    def _save_current_position():
+        pos = {"phase_idx": 0, "group_idx": 0, "round_idx": 0}
+        for pi, phase in enumerate(cassette.phases):
+            for gi, group in enumerate(phase.groups):
+                rc = rounds_completed(group)
+                if rc < group.rounds and not group.skipped:
+                    pos = {"phase_idx": pi, "group_idx": gi, "round_idx": rc}
+                    break
+        save_state(cassette, pos, cassette_path)
+
+    while True:
+        try:
+            play_cassette(cassette, cassette_path)
+            break
+        except WorkoutPaused:
+            restore_terminal()
+            _save_current_position()
+            if _say_proc and _say_proc.poll() is None:
+                _say_proc.terminate()
+            print("\n\nWorkout paused. Progress saved. Type 'fg' to resume.\n")
+            # Actually suspend the process
+            signal.signal(signal.SIGTSTP, signal.SIG_DFL)
+            os.kill(os.getpid(), signal.SIGTSTP)
+            # --- execution resumes here after fg ---
+            print("Resuming workout...\n")
+            continue
+        except KeyboardInterrupt:
+            restore_terminal()
+            _save_current_position()
+            if _say_proc and _say_proc.poll() is None:
+                _say_proc.terminate()
+            print("\n\nWorkout stopped. Progress saved.\n")
+            print_log(cassette)
+            break
 
 
 if __name__ == "__main__":
