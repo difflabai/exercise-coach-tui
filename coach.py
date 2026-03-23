@@ -1439,6 +1439,11 @@ def try_resume(cassette: Cassette, cassette_path: str | None, auto: bool = False
 
     total_sets, _ = count_sets(cassette)
 
+    # Don't resume a completed workout
+    if total_done >= total_sets:
+        clear_state()
+        return None
+
     if age_hours > STALE_HOURS:
         console.print(f"[yellow]Found saved state from {age_hours:.1f} hours ago.[/yellow]")
 
@@ -1522,25 +1527,39 @@ def main() -> None:
             cassette, _ = parse_input(text, args.rest)
         position = apply_state(cassette, state)
     else:
-        text = read_input(args.file)
-        cassette, is_json = parse_input(text, args.rest)
+        resumed_from_state = False
+        # If no file given, check saved state for a cassette path to resume
+        if not args.file:
+            state = load_state_data()
+            saved_path = state.get("cassette_path", "") if state else ""
+            if saved_path and Path(saved_path).exists():
+                tmp_cassette = load_cassette(saved_path) if saved_path.endswith(".json") else parse_input(Path(saved_path).read_text(), args.rest)[0]
+                resumed = try_resume(tmp_cassette, saved_path)
+                if resumed is not None:
+                    cassette = tmp_cassette
+                    cassette_path = saved_path
+                    resumed_from_state = True
 
-        if not cassette.phases or not any(g for p in cassette.phases for g in p.groups):
-            print("No exercises parsed. Check your input format.", file=sys.stderr)
-            sys.exit(1)
+        if not resumed_from_state:
+            text = read_input(args.file)
+            cassette, is_json = parse_input(text, args.rest)
 
-        if args.file and args.file.endswith(".json"):
-            cassette_path = args.file
+            if not cassette.phases or not any(g for p in cassette.phases for g in p.groups):
+                print("No exercises parsed. Check your input format.", file=sys.stderr)
+                sys.exit(1)
 
-        # Apply --rest override: always for text input, only when explicitly set for JSON
-        rest_override = not is_json or args.rest != 75
-        if rest_override:
-            for phase in cassette.phases:
-                for group in phase.groups:
-                    group.rest = args.rest
+            if args.file and args.file.endswith(".json"):
+                cassette_path = args.file
 
-        # Try resume
-        try_resume(cassette, cassette_path)
+            # Apply --rest override: always for text input, only when explicitly set for JSON
+            rest_override = not is_json or args.rest != 75
+            if rest_override:
+                for phase in cassette.phases:
+                    for group in phase.groups:
+                        group.rest = args.rest
+
+            # Try resume (when file was explicitly provided)
+            try_resume(cassette, cassette_path)
 
     def _save_current_position():
         pos = {"phase_idx": 0, "group_idx": 0, "round_idx": 0}
