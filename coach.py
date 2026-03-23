@@ -480,26 +480,44 @@ def count_sets(cassette: Cassette) -> tuple[int, int]:
 
 
 
-def undo_last_set_global(cassette: Cassette) -> tuple[int, int] | None:
-    """Undo the most recently completed set across the entire cassette.
-    Returns (phase_idx, group_idx) of the undone set, or None."""
-    last_pi, last_gi, last_round, last_ei = -1, -1, -1, -1
+def clear_group_progress(group: Group) -> None:
+    """Reset all completed sets in a group so it can be replayed."""
+    group.skipped = False
+    for ex in group.exercises:
+        for s in ex.sets:
+            s.actual_reps = None
+            s.failure = False
+
+
+def go_back_to_previous_group(
+    cassette: Cassette, cur_pi: int, cur_gi: int,
+) -> tuple[int, int] | None:
+    """Go back to the previous group (opposite of skip).
+    Clears progress in both the current and target groups.
+    Returns (phase_idx, group_idx) of the target group, or None if at the start."""
+    # Build flat list of (phase_idx, group_idx) pairs
+    all_groups = []
     for pi, phase in enumerate(cassette.phases):
-        for gi, group in enumerate(phase.groups):
-            if group.skipped:
-                continue
-            for r in range(group.rounds):
-                for ei, ex in enumerate(group.exercises):
-                    if r < len(ex.sets) and ex.sets[r].actual_reps is not None:
-                        last_pi, last_gi, last_round, last_ei = pi, gi, r, ei
-    if last_pi < 0:
+        for gi in range(len(phase.groups)):
+            all_groups.append((pi, gi))
+
+    # Find current position in the flat list
+    try:
+        pos = all_groups.index((cur_pi, cur_gi))
+    except ValueError:
         return None
-    grp = cassette.phases[last_pi].groups[last_gi]
-    s = grp.exercises[last_ei].sets[last_round]
-    s.actual_reps = None
-    s.failure = False
-    grp.skipped = False
-    return (last_pi, last_gi)
+
+    if pos == 0:
+        return None  # already at the very first group
+
+    target_pi, target_gi = all_groups[pos - 1]
+
+    # Clear progress in current group
+    clear_group_progress(cassette.phases[cur_pi].groups[cur_gi])
+    # Clear progress in target group so it replays
+    clear_group_progress(cassette.phases[target_pi].groups[target_gi])
+
+    return (target_pi, target_gi)
 
 
 def rounds_completed(group: Group) -> int:
@@ -891,8 +909,9 @@ def pause_screen(
 def transition_screen(
     live: Live, cassette: Cassette, cur_phase: int, cur_group: int,
     group: Group, avg_rep_set: float = 30.0,
-) -> None:
-    """Show a setup/transition screen between groups. Blocks until Enter."""
+) -> str:
+    """Show a setup/transition screen between groups. Blocks until Enter.
+    Returns 'go_back' if b pressed, 'done' otherwise."""
     # Build description of what's next
     exercises_desc = []
     for ex in group.exercises:
@@ -904,7 +923,7 @@ def transition_screen(
     content = "[bold cyan]Next up:[/bold cyan]\n" + "\n".join(exercises_desc)
     if group.setup:
         content += f"\n\n[yellow]{group.setup}[/yellow]"
-    content += "\n\n[dim]Press Enter when ready[/dim]"
+    content += "\n\n[dim]Enter = ready  •  s = skip  •  b = back[/dim]"
 
     # Voice the transition
     names = [ex.name for ex in group.exercises]
@@ -937,12 +956,18 @@ def transition_screen(
             elif key == "s":
                 group.skipped = True
                 break
+            elif key == "b":
+                drain_stdin()
+                restore_terminal()
+                return "go_back"
             elif key == "ctrl-z":
                 raise WorkoutPaused()
 
             time.sleep(0.25)
     finally:
         restore_terminal()
+
+    return "done"
 
 
 # ---------------------------------------------------------------------------
@@ -1200,7 +1225,13 @@ def play_cassette(cassette: Cassette, cassette_path: str | None = None) -> None:
                 # Transition screen between groups (not before the first unstarted group)
                 already_started = rounds_completed(group) > 0
                 if not already_started and not resuming:
-                    transition_screen(live, cassette, pi, gi, group, avg_rep_set())
+                    tr_result = transition_screen(live, cassette, pi, gi, group, avg_rep_set())
+                    if tr_result == "go_back":
+                        back_result = go_back_to_previous_group(cassette, pi, gi)
+                        if back_result is not None:
+                            jump_back = back_result
+                            break
+                        continue
                     if group.skipped:
                         gi += 1
                         continue
@@ -1216,10 +1247,8 @@ def play_cassette(cassette: Cassette, cassette_path: str | None = None) -> None:
                     if skip_group:
                         break
 
-                    go_back = False
-
                     for ei, ex in enumerate(group.exercises):
-                        if skip_group or go_back or jump_back is not None:
+                        if skip_group or jump_back is not None:
                             break
 
                         set_data = ex.sets[round_idx]
@@ -1235,12 +1264,9 @@ def play_cassette(cassette: Cassette, cassette_path: str | None = None) -> None:
                                 skip_group = True
                                 break
                             if result == "go_back":
-                                undo_result = undo_last_set_global(cassette)
-                                if undo_result is not None:
-                                    if undo_result == (pi, gi):
-                                        go_back = True
-                                    else:
-                                        jump_back = undo_result
+                                back_result = go_back_to_previous_group(cassette, pi, gi)
+                                if back_result is not None:
+                                    jump_back = back_result
                                 break
                             set_data.actual_reps = set_data.reps
                         else:
@@ -1279,12 +1305,9 @@ def play_cassette(cassette: Cassette, cassette_path: str | None = None) -> None:
                                         skip_group = True
                                         break
                                     elif key == "b":
-                                        undo_result = undo_last_set_global(cassette)
-                                        if undo_result is not None:
-                                            if undo_result == (pi, gi):
-                                                go_back = True
-                                            else:
-                                                jump_back = undo_result
+                                        back_result = go_back_to_previous_group(cassette, pi, gi)
+                                        if back_result is not None:
+                                            jump_back = back_result
                                         break
                                     elif key == "p":
                                         restore_terminal()
@@ -1300,10 +1323,10 @@ def play_cassette(cassette: Cassette, cassette_path: str | None = None) -> None:
                             finally:
                                 restore_terminal()
 
-                            if not skip_group and not go_back and jump_back is None:
+                            if not skip_group and jump_back is None:
                                 rep_set_durations.append(time.time() - set_start)
 
-                        if skip_group or go_back or jump_back is not None:
+                        if skip_group or jump_back is not None:
                             break
 
                         # Set complete
@@ -1311,11 +1334,6 @@ def play_cassette(cassette: Cassette, cassette_path: str | None = None) -> None:
 
                     if jump_back is not None:
                         break
-
-                    if go_back:
-                        # Recalculate position after undo
-                        round_idx = rounds_completed(group)
-                        continue
 
                     if skip_group:
                         group.skipped = True
@@ -1339,15 +1357,10 @@ def play_cassette(cassette: Cassette, cassette_path: str | None = None) -> None:
                             save_state(cassette, {"phase_idx": pi, "group_idx": gi, "round_idx": round_idx + 1}, cassette_path)
                             break
                         if result == "go_back":
-                            undo_result = undo_last_set_global(cassette)
-                            if undo_result is not None:
-                                if undo_result == (pi, gi):
-                                    round_idx = rounds_completed(group)
-                                    continue
-                                else:
-                                    jump_back = undo_result
-                                    break
-                            round_idx = rounds_completed(group)
+                            back_result = go_back_to_previous_group(cassette, pi, gi)
+                            if back_result is not None:
+                                jump_back = back_result
+                                break
                             continue
 
                     round_idx += 1
