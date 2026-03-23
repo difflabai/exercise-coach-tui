@@ -104,6 +104,7 @@ class Cassette:
     context_exercises: list[ContextExercise] = field(default_factory=list)
     voice_session_intro: str | None = None
     voice_session_complete: str | None = None
+    _source: str = ""  # raw input text for saving in state
 
 
 # ---------------------------------------------------------------------------
@@ -743,12 +744,14 @@ def save_state(cassette: Cassette, position: dict, cassette_path: str | None = N
                 "sets": sets_data,
             })
 
-    # Read cassette source so state is self-contained for resume
+    # Save cassette source so state is self-contained for resume
     cassette_source = ""
     if cassette_path:
         p = Path(cassette_path)
         if p.exists():
             cassette_source = p.read_text()
+    if not cassette_source:
+        cassette_source = cassette._source
 
     data = {
         "timestamp": time.time(),
@@ -1404,11 +1407,15 @@ def parse_input(text: str, rest: int) -> tuple[Cassette, bool]:
         try:
             data = json.loads(stripped)
             if "phases" in data:
-                return load_cassette_from_dict(data), True
+                c = load_cassette_from_dict(data)
+                c._source = text
+                return c, True
         except (json.JSONDecodeError, KeyError, TypeError):
             pass
     exercises = parse_workout(text)
-    return text_to_cassette(exercises, rest), False
+    c = text_to_cassette(exercises, rest)
+    c._source = text
+    return c, False
 
 
 # ---------------------------------------------------------------------------
