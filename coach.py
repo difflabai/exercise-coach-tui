@@ -505,16 +505,6 @@ def rounds_completed(group: Group) -> int:
     return group.rounds
 
 
-def is_final_moment(cassette: Cassette, phase_idx: int, group_idx: int, round_idx: int) -> bool:
-    """True if this is the last round of the last group of the last phase."""
-    if phase_idx < len(cassette.phases) - 1:
-        return False
-    phase = cassette.phases[phase_idx]
-    if group_idx < len(phase.groups) - 1:
-        return False
-    group = phase.groups[group_idx]
-    return round_idx >= group.rounds - 1
-
 
 def get_cues_for_round(group: Group, round_idx: int) -> list[TimedCue]:
     if round_idx < len(group.voice_during_set):
@@ -1230,7 +1220,7 @@ def play_cassette(cassette: Cassette, cassette_path: str | None = None) -> None:
                     save_state(cassette, {"phase_idx": pi, "group_idx": gi, "round_idx": round_idx + 1}, cassette_path)
 
                     # Rest (skip after last round of last group of last phase)
-                    if not is_final_moment(cassette, pi, gi, round_idx):
+                    if round_idx < group.rounds - 1:
                         result = rest_timer(
                             cassette, pi, gi, group.rest, live, avg_rep_set(),
                         )
