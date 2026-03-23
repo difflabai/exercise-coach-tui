@@ -478,22 +478,6 @@ def count_sets(cassette: Cassette) -> tuple[int, int]:
     return total, done
 
 
-def undo_last_set(group: Group) -> bool:
-    """Reset the most recently completed set in a group. Returns True if a set was undone."""
-    last_round = -1
-    last_ei = -1
-    for r in range(group.rounds):
-        for ei, ex in enumerate(group.exercises):
-            if r < len(ex.sets) and ex.sets[r].actual_reps is not None:
-                last_round = r
-                last_ei = ei
-    if last_round < 0:
-        return False
-    s = group.exercises[last_ei].sets[last_round]
-    s.actual_reps = None
-    s.failure = False
-    return True
-
 
 def undo_last_set_global(cassette: Cassette) -> tuple[int, int] | None:
     """Undo the most recently completed set across the entire cassette.
