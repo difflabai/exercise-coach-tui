@@ -1442,16 +1442,12 @@ def try_resume(cassette: Cassette, cassette_path: str | None, auto: bool = False
             clear_state()
             return None
 
-    # Check if there's any progress
+    # Check progress
     groups_state = state.get("groups_state", [])
     total_done = sum(
         sum(1 for ex_sets in gs.get("sets", []) for s in ex_sets if s.get("actual_reps") is not None)
         for gs in groups_state
     )
-    if total_done == 0:
-        clear_state()
-        return None
-
     total_sets, _ = count_sets(cassette)
 
     # Don't resume a completed workout
