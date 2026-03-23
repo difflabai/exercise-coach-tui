@@ -78,6 +78,7 @@ class Group:
     voice_round_complete: list[str] = field(default_factory=list)
     voice_group_complete: str | None = None
     voice_during_set: list[list[TimedCue]] = field(default_factory=list)
+    setup: str | None = None
     skipped: bool = False
 
 
@@ -219,6 +220,7 @@ def load_cassette_from_dict(data: dict) -> Cassette:
                 voice_round_complete=g.get("voice_round_complete", []),
                 voice_group_complete=g.get("voice_group_complete"),
                 voice_during_set=timed_cues,
+                setup=g.get("setup"),
             ))
         phases.append(Phase(
             type=phase_data.get("type", "main"),
@@ -868,6 +870,63 @@ def pause_screen(
     return time.time() - start
 
 
+def transition_screen(
+    live: Live, cassette: Cassette, cur_phase: int, cur_group: int,
+    group: Group, avg_rep_set: float = 30.0,
+) -> None:
+    """Show a setup/transition screen between groups. Blocks until Enter."""
+    # Build description of what's next
+    exercises_desc = []
+    for ex in group.exercises:
+        line = f"[bold]{ex.name}[/bold]"
+        if ex.load:
+            line += f"  ({ex.load})"
+        exercises_desc.append(line)
+
+    content = "[bold cyan]Next up:[/bold cyan]\n" + "\n".join(exercises_desc)
+    if group.setup:
+        content += f"\n\n[yellow]{group.setup}[/yellow]"
+    content += "\n\n[dim]Press Enter when ready[/dim]"
+
+    # Voice the transition
+    names = [ex.name for ex in group.exercises]
+    voice_line = "Next up: " + " and ".join(names)
+    if group.exercises and group.exercises[0].load:
+        voice_line += f", {group.exercises[0].load}"
+    say(voice_line)
+
+    enter_cbreak()
+    drain_stdin()
+
+    try:
+        while True:
+            overview = build_overview(cassette, cur_phase, cur_group)
+            panel = Panel(
+                content, title="Setup", border_style="cyan", expand=True, padding=(1, 4),
+            )
+            progress_text = build_progress_bar(cassette, avg_rep_set)
+            render_layout(live, overview, panel, progress_text)
+
+            key = read_key()
+            if key == "enter":
+                break
+            elif key == "p":
+                restore_terminal()
+                pause_screen(live, cassette, cur_phase, cur_group, avg_rep_set)
+                enter_cbreak()
+                drain_stdin()
+                continue
+            elif key == "s":
+                group.skipped = True
+                break
+            elif key == "ctrl-z":
+                raise WorkoutPaused()
+
+            time.sleep(0.25)
+    finally:
+        restore_terminal()
+
+
 # ---------------------------------------------------------------------------
 # Rest timer
 # ---------------------------------------------------------------------------
@@ -1108,6 +1167,14 @@ def play_cassette(cassette: Cassette, cassette_path: str | None = None) -> None:
             for gi, group in enumerate(phase.groups):
                 if group.skipped:
                     continue
+
+                # Transition screen between groups (not before the first unstarted group)
+                is_first_group = (pi == 0 and gi == 0)
+                already_started = rounds_completed(group) > 0
+                if not is_first_group and not already_started:
+                    transition_screen(live, cassette, pi, gi, group, avg_rep_set())
+                    if group.skipped:
+                        continue
 
                 speak(group.voice_intro)
 
