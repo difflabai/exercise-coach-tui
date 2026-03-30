@@ -333,6 +333,7 @@ def _generate_exercise_complete_tone() -> bytes:
 
 _SOUND_SET_COMPLETE = _generate_reward_tone()
 _SOUND_GROUP_COMPLETE = _generate_exercise_complete_tone()
+_SOUND_REST_DONE = _generate_tone(1047, 300, 0.5)  # C5 ping when rest finishes
 
 # ---------------------------------------------------------------------------
 # Voice
@@ -981,6 +982,7 @@ def rest_timer(
     """Countdown rest timer. Returns 'skip_group' if s pressed, else 'done'."""
     start = time.time()
     nag_count = 0
+    rest_done_dinged = False
 
     enter_cbreak()
     drain_stdin()
@@ -992,6 +994,9 @@ def rest_timer(
             overtime = remaining < 0
 
             if overtime:
+                if not rest_done_dinged:
+                    rest_done_dinged = True
+                    play_sound(_SOUND_REST_DONE)
                 overtime_secs = int(-remaining)
                 if overtime_secs >= 15 and overtime_secs // 15 > nag_count:
                     nag_count = overtime_secs // 15
