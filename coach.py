@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import select
 import signal
 import subprocess
@@ -359,14 +360,28 @@ def play_sound(sound_data: bytes) -> None:
         pass
 
 
+def _tts_cmd(text: str) -> list[str]:
+    """Return the TTS command list for the current platform."""
+    if shutil.which("say"):
+        return ["say", text]
+    if shutil.which("espeak-ng"):
+        return ["espeak-ng", text]
+    if shutil.which("espeak"):
+        return ["espeak", text]
+    return []
+
+
 def say(text: str) -> None:
     """Non-blocking speech."""
     global _say_proc
+    cmd = _tts_cmd(text)
+    if not cmd:
+        return
     try:
         if _say_proc and _say_proc.poll() is None:
             _say_proc.terminate()
         _say_proc = subprocess.Popen(
-            ["say", text], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
     except FileNotFoundError:
         pass
@@ -375,11 +390,16 @@ def say(text: str) -> None:
 def say_sync(text: str, wait: float = 0) -> None:
     """Blocking speech."""
     global _say_proc
+    cmd = _tts_cmd(text)
+    if not cmd:
+        if wait > 0:
+            time.sleep(wait)
+        return
     try:
         if _say_proc and _say_proc.poll() is None:
             _say_proc.terminate()
         _say_proc = subprocess.Popen(
-            ["say", text], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
         _say_proc.wait()
         if wait > 0:
