@@ -29,6 +29,7 @@ from rich import box
 # ---------------------------------------------------------------------------
 
 STATE_FILE = Path(__file__).parent / ".workout_state.json"
+LOG_FILE = Path(__file__).parent / "workout_log.txt"
 
 
 class WorkoutPaused(Exception):
@@ -885,6 +886,20 @@ def print_log(cassette: Cassette) -> None:
     print("\n" + render_log(cassette) + "\n")
 
 
+def save_log(cassette: Cassette) -> None:
+    """Append a timestamped workout log entry to the log file."""
+    from datetime import datetime
+    title = cassette.meta.get("title", "Workout")
+    program = cassette.meta.get("program", "")
+    header = f"--- {title}"
+    if program:
+        header += f" ({program})"
+    header += f" | {datetime.now().strftime('%Y-%m-%d %H:%M')} ---"
+    entry = header + "\n" + render_log(cassette) + "\n\n"
+    with open(LOG_FILE, "a") as f:
+        f.write(entry)
+
+
 # ---------------------------------------------------------------------------
 # Pause
 # ---------------------------------------------------------------------------
@@ -1188,6 +1203,7 @@ def play_cassette(cassette: Cassette, cassette_path: str | None = None) -> None:
     if total > 0 and done >= total:
         console.print("[green]All exercises already complete![/green]")
         print_log(cassette)
+        save_log(cassette)
         return
 
     rep_set_durations: list[float] = []
@@ -1412,6 +1428,7 @@ def play_cassette(cassette: Cassette, cassette_path: str | None = None) -> None:
     speak(cassette.voice_session_complete)
     console.print("[bold green]Workout complete![/bold green]\n")
     print_log(cassette)
+    save_log(cassette)
     clear_state()
 
 
@@ -1655,6 +1672,7 @@ def main() -> None:
                 _say_proc.terminate()
             print("\n\nWorkout stopped. Progress saved.\n")
             print_log(cassette)
+            save_log(cassette)
             break
 
 
