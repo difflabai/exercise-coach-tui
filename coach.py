@@ -342,6 +342,9 @@ _SOUND_REST_DONE = _generate_tone(1047, 300, 0.5)  # C5 ping when rest finishes
 # ---------------------------------------------------------------------------
 
 _say_proc: subprocess.Popen | None = None
+_caption: str = ""
+_caption_time: float = 0.0
+CAPTION_DURATION = 4.0  # seconds to show caption
 
 
 def play_sound(sound_data: bytes) -> None:
@@ -372,9 +375,16 @@ def _tts_cmd(text: str) -> list[str]:
     return []
 
 
+def _set_caption(text: str) -> None:
+    global _caption, _caption_time
+    _caption = text
+    _caption_time = time.time()
+
+
 def say(text: str) -> None:
     """Non-blocking speech."""
     global _say_proc
+    _set_caption(text)
     cmd = _tts_cmd(text)
     if not cmd:
         return
@@ -391,6 +401,7 @@ def say(text: str) -> None:
 def say_sync(text: str, wait: float = 0) -> None:
     """Blocking speech."""
     global _say_proc
+    _set_caption(text)
     cmd = _tts_cmd(text)
     if not cmd:
         if wait > 0:
@@ -755,6 +766,17 @@ def render_layout(live: Live, overview: Table, panel: Panel, progress_text: str)
     layout.add_row(overview)
     layout.add_row(panel)
     layout.add_row(Text.from_markup(progress_text))
+
+    # Caption subtitle — shows what TTS just said
+    age = time.time() - _caption_time
+    if _caption and age < CAPTION_DURATION:
+        if age < CAPTION_DURATION * 0.75:
+            style = "bold italic bright_white on grey23"
+        else:
+            style = "italic grey62"
+        caption_text = Text(f" 🗣  {_caption} ", style=style, justify="center")
+        layout.add_row(caption_text)
+
     live.update(layout)
 
 
