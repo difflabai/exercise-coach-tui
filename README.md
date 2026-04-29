@@ -55,4 +55,18 @@ Progress auto-saves on every completed set and on Ctrl-C. Re-run the same workou
 
 Coaching cues use, in order: macOS `say`, [piper](https://github.com/rhasspy/piper) (if `piper` and `aplay` are on PATH and a voice model is found), then `espeak-ng`/`espeak`. Silently skipped if none are available.
 
-For piper on Linux, install `piper-tts` and a voice model — drop the `.onnx` and `.onnx.json` pair in `~/piper-voices/` (or `~/.local/share/piper-voices/`), or point `PIPER_MODEL` at a specific `.onnx` file.
+### Piper setup (Linux)
+
+```bash
+pip install piper-tts
+
+# Grab a voice model (lessac/medium is a good default)
+mkdir -p ~/piper-voices && cd ~/piper-voices
+wget https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx
+wget https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json
+
+# Smoke-test
+echo "the velcro cat approaches" | piper -m ~/piper-voices/en_US-lessac-medium.onnx -f out.wav && aplay out.wav
+```
+
+The coach picks up any `.onnx` file in `~/piper-voices/` or `~/.local/share/piper-voices/`. To pin a specific voice, set `PIPER_MODEL=/path/to/voice.onnx`. Browse other voices at [rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices).
