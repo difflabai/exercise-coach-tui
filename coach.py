@@ -344,7 +344,7 @@ _SOUND_REST_DONE = _generate_tone(1047, 300, 0.5)  # C5 ping when rest finishes
 _say_procs: list[subprocess.Popen] = []
 _caption: str = ""
 _caption_time: float = 0.0
-CAPTION_DURATION = 4.0  # seconds to show caption
+CAPTION_DURATION = 12.0  # seconds to show caption
 
 
 def play_sound(sound_data: bytes) -> None:
