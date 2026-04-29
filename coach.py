@@ -364,17 +364,26 @@ def play_sound(sound_data: bytes) -> None:
         pass
 
 
+PIPER_PREFERRED_VOICE = "en_US-ryan-high.onnx"
+
+
 def _piper_model() -> str | None:
     """Locate a piper voice model. Honors $PIPER_MODEL, otherwise scans common dirs."""
     env = os.environ.get("PIPER_MODEL")
     if env and os.path.isfile(env):
         return env
-    for d in ("~/.local/share/piper-voices", "~/piper-voices", "~/.local/share/piper"):
-        path = os.path.expanduser(d)
-        if os.path.isdir(path):
-            for name in sorted(os.listdir(path)):
+    dirs = [os.path.expanduser(d) for d in (
+        "~/.local/share/piper-voices", "~/piper-voices", "~/.local/share/piper",
+    )]
+    for d in dirs:
+        preferred = os.path.join(d, PIPER_PREFERRED_VOICE)
+        if os.path.isfile(preferred):
+            return preferred
+    for d in dirs:
+        if os.path.isdir(d):
+            for name in sorted(os.listdir(d)):
                 if name.endswith(".onnx"):
-                    return os.path.join(path, name)
+                    return os.path.join(d, name)
     return None
 
 

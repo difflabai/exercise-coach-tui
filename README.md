@@ -60,13 +60,13 @@ Coaching cues use, in order: macOS `say`, [piper](https://github.com/rhasspy/pip
 ```bash
 pip install piper-tts
 
-# Grab a voice model (lessac/medium is a good default)
+# Grab the recommended voice (ryan/high — punchier than lessac for coaching cues)
 mkdir -p ~/piper-voices && cd ~/piper-voices
-wget https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx
-wget https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json
+wget https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ryan/high/en_US-ryan-high.onnx
+wget https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ryan/high/en_US-ryan-high.onnx.json
 
 # Smoke-test
-echo "the velcro cat approaches" | piper -m ~/piper-voices/en_US-lessac-medium.onnx -f out.wav && aplay out.wav
+echo "the velcro cat approaches" | piper -m ~/piper-voices/en_US-ryan-high.onnx -f out.wav && aplay out.wav
 ```
 
-The coach picks up any `.onnx` file in `~/piper-voices/` or `~/.local/share/piper-voices/`. To pin a specific voice, set `PIPER_MODEL=/path/to/voice.onnx`. Browse other voices at [rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices).
+The coach prefers `en_US-ryan-high.onnx` if present; otherwise it picks the first `.onnx` it finds in `~/piper-voices/` or `~/.local/share/piper-voices/`. To pin a specific voice, set `PIPER_MODEL=/path/to/voice.onnx`. Browse other voices at [rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices).
