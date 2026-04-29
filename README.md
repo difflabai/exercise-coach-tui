@@ -53,4 +53,6 @@ Progress auto-saves on every completed set and on Ctrl-C. Re-run the same workou
 
 ## Voice
 
-Uses macOS `say` for coaching cues. Silently skipped on other platforms.
+Coaching cues use, in order: macOS `say`, [piper](https://github.com/rhasspy/piper) (if `piper` and `aplay` are on PATH and a voice model is found), then `espeak-ng`/`espeak`. Silently skipped if none are available.
+
+For piper on Linux, install `piper-tts` and a voice model — drop the `.onnx` and `.onnx.json` pair in `~/piper-voices/` (or `~/.local/share/piper-voices/`), or point `PIPER_MODEL` at a specific `.onnx` file.

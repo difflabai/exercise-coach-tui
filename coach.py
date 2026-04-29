@@ -341,7 +341,7 @@ _SOUND_REST_DONE = _generate_tone(1047, 300, 0.5)  # C5 ping when rest finishes
 # Voice
 # ---------------------------------------------------------------------------
 
-_say_proc: subprocess.Popen | None = None
+_say_procs: list[subprocess.Popen] = []
 _caption: str = ""
 _caption_time: float = 0.0
 CAPTION_DURATION = 4.0  # seconds to show caption
@@ -364,8 +364,61 @@ def play_sound(sound_data: bytes) -> None:
         pass
 
 
-def _tts_cmd(text: str) -> list[str]:
-    """Return the TTS command list for the current platform."""
+def _piper_model() -> str | None:
+    """Locate a piper voice model. Honors $PIPER_MODEL, otherwise scans common dirs."""
+    env = os.environ.get("PIPER_MODEL")
+    if env and os.path.isfile(env):
+        return env
+    for d in ("~/.local/share/piper-voices", "~/piper-voices", "~/.local/share/piper"):
+        path = os.path.expanduser(d)
+        if os.path.isdir(path):
+            for name in sorted(os.listdir(path)):
+                if name.endswith(".onnx"):
+                    return os.path.join(path, name)
+    return None
+
+
+def _piper_sample_rate(model: str) -> int:
+    try:
+        with open(model + ".json") as f:
+            return int(json.load(f).get("audio", {}).get("sample_rate", 22050))
+    except (OSError, ValueError):
+        return 22050
+
+
+def _start_piper(text: str) -> list[subprocess.Popen] | None:
+    """Synthesize via piper and play via aplay. Returns the proc chain, or None if unavailable."""
+    if not (shutil.which("piper") and shutil.which("aplay")):
+        return None
+    model = _piper_model()
+    if not model:
+        return None
+    rate = _piper_sample_rate(model)
+    try:
+        piper = subprocess.Popen(
+            ["piper", "--model", model, "--output_raw"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+        if piper.stdin is not None:
+            piper.stdin.write(text.encode())
+            piper.stdin.close()
+        aplay = subprocess.Popen(
+            ["aplay", "-q", "-r", str(rate), "-f", "S16_LE", "-c", "1", "-t", "raw", "-"],
+            stdin=piper.stdout,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        if piper.stdout is not None:
+            piper.stdout.close()
+        return [piper, aplay]
+    except OSError:
+        return None
+
+
+def _tts_fallback_cmd(text: str) -> list[str]:
+    """Single-command TTS fallback when piper isn't available."""
     if shutil.which("say"):
         return ["say", text]
     if shutil.which("espeak-ng"):
@@ -381,44 +434,52 @@ def _set_caption(text: str) -> None:
     _caption_time = time.time()
 
 
+def _terminate_say() -> None:
+    global _say_procs
+    for p in _say_procs:
+        try:
+            if p.poll() is None:
+                p.terminate()
+        except OSError:
+            pass
+    _say_procs = []
+
+
+def _start_say(text: str) -> None:
+    """Kick off TTS for `text`. Tries piper first, then a single-command fallback."""
+    global _say_procs
+    _terminate_say()
+    procs = _start_piper(text)
+    if procs is None:
+        cmd = _tts_fallback_cmd(text)
+        if not cmd:
+            return
+        try:
+            procs = [subprocess.Popen(
+                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )]
+        except OSError:
+            return
+    _say_procs = procs
+
+
 def say(text: str) -> None:
     """Non-blocking speech."""
-    global _say_proc
     _set_caption(text)
-    cmd = _tts_cmd(text)
-    if not cmd:
-        return
-    try:
-        if _say_proc and _say_proc.poll() is None:
-            _say_proc.terminate()
-        _say_proc = subprocess.Popen(
-            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-    except FileNotFoundError:
-        pass
+    _start_say(text)
 
 
 def say_sync(text: str, wait: float = 0) -> None:
     """Blocking speech."""
-    global _say_proc
     _set_caption(text)
-    cmd = _tts_cmd(text)
-    if not cmd:
-        if wait > 0:
-            time.sleep(wait)
-        return
-    try:
-        if _say_proc and _say_proc.poll() is None:
-            _say_proc.terminate()
-        _say_proc = subprocess.Popen(
-            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        _say_proc.wait()
-        if wait > 0:
-            time.sleep(wait)
-    except FileNotFoundError:
-        if wait > 0:
-            time.sleep(wait)
+    _start_say(text)
+    if _say_procs:
+        try:
+            _say_procs[-1].wait()
+        except OSError:
+            pass
+    if wait > 0:
+        time.sleep(wait)
 
 
 def speak(line: str | None) -> None:
@@ -931,9 +992,7 @@ def pause_screen(
     avg_rep_set: float = 30.0,
 ) -> float:
     """Show pause overlay. Returns seconds spent paused."""
-    global _say_proc
-    if _say_proc and _say_proc.poll() is None:
-        _say_proc.terminate()
+    _terminate_say()
 
     start = time.time()
     enter_cbreak()
@@ -1678,8 +1737,7 @@ def main() -> None:
         except WorkoutPaused:
             restore_terminal()
             _save_current_position()
-            if _say_proc and _say_proc.poll() is None:
-                _say_proc.terminate()
+            _terminate_say()
             print("\n\nWorkout paused. Progress saved. Type 'fg' to resume.\n")
             # Actually suspend the process
             signal.signal(signal.SIGTSTP, signal.SIG_DFL)
@@ -1690,8 +1748,7 @@ def main() -> None:
         except KeyboardInterrupt:
             restore_terminal()
             _save_current_position()
-            if _say_proc and _say_proc.poll() is None:
-                _say_proc.terminate()
+            _terminate_say()
             print("\n\nWorkout stopped. Progress saved.\n")
             print_log(cassette)
             save_log(cassette)
