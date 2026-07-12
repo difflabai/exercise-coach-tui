@@ -20,17 +20,27 @@ from .audio import play_sound, sound_group_complete, sound_set_complete
 from .buddy import celebrate
 from .cassette import all_groups, count_sets, rounds_completed
 from .events import Event
+from .jumpmenu import JumpTarget
 from .models import Cassette, Group
 from .screens import (
     context_screen,
     get_failure_reps,
+    jump_menu_screen,
     rep_set_screen,
     rest_timer,
     timed_hold,
     transition_screen,
 )
-from .state import clear_state, print_log, save_log, save_state
-from .tts import say, speak
+from .state import (
+    clear_state,
+    print_log,
+    render_partial_log,
+    save_log,
+    save_partial_log,
+    save_state,
+)
+from .term import WorkoutPaused, restore_terminal
+from .tts import say, speak, terminate_say
 
 
 def clear_group_progress(group: Group) -> None:
@@ -72,12 +82,16 @@ class Player:
         now: Callable[[], float] = time.time,
         read_key: Callable[[], str] | None = None,
         sleep: Callable[[float], None] = time.sleep,
+        persist_state: bool = True,
     ) -> None:
         self.cassette = cassette
         self.cassette_path = cassette_path
         self.now = now
         self.read_key = read_key
         self.sleep = sleep
+        # --only runs disable this so they can never clobber a saved
+        # full-session state file.
+        self.persist_state = persist_state
 
         # Playhead
         self.phase_idx = 0
@@ -87,11 +101,19 @@ class Player:
 
         self.rep_set_durations: list[float] = []
 
-        # Set when 'b' interrupts a rest period: (phase_idx, group_idx) of the
-        # group whose rest was cut short. Re-entering that group mid-round
-        # restarts the rest instead of dropping the user straight into the
-        # next set.
-        self._pending_rest: tuple[int, int] | None = None
+        # (phase_idx, group_idx) of every group whose rest period was cut
+        # short by 'b' (or 'j'). Re-entering such a group mid-round restarts
+        # its rest instead of dropping the user straight into the next set.
+        # A set, not a single slot: jumping around can interrupt several
+        # groups' rests and each one stays owed independently.
+        self._pending_rest: set[tuple[int, int]] = set()
+
+        # How to re-enter the interrupted group when the jump menu is
+        # cancelled: True = the via_back way (no transition screen, no intro
+        # replay — set by rest/rep-set/completed screens), False = re-show
+        # the setup screen (set by the fresh transition screen, where
+        # nothing has started yet).
+        self._jump_resume_via_back = True
 
     # -- playhead queries ---------------------------------------------------
 
@@ -173,12 +195,117 @@ class Player:
                 if self.previous_group():
                     via_back = True
                 continue
+            if ev is Event.JUMP:
+                via_back = self._apply_jump(live)
+                continue
             if not self.advance_group():
                 return
 
+    def _apply_jump(self, live: Live) -> bool:
+        """Show the jump menu and apply the selection.
+
+        Returns True when the interrupted group should be re-entered the
+        via_back way (menu cancelled from a mid-group screen: no transition
+        replay, no re-spoken intro, completed sets stay guarded)."""
+        target = jump_menu_screen(
+            live, self.cassette, self.phase_idx, self.group_idx,
+            self.avg_rep_set(),
+            now=self.now, read_key=self.read_key, sleep=self.sleep,
+        )
+        if target is None:
+            return self._jump_resume_via_back
+        group = self.cassette.phases[target.phase_idx].groups[target.group_idx]
+        if target.redo:
+            # Reuses the REDO semantics: the one destructive action, already
+            # 'y'-confirmed inside the menu. Only this group is cleared.
+            clear_group_progress(group)
+            self.jump_to(target.phase_idx, target.group_idx)
+            return False
+        if target.round_idx is not None:
+            self.play_single_set(live, target)
+            # One set only: do NOT continue the rest of that group — return
+            # to the normal flow at the next incomplete group in cassette
+            # order. When nothing else is incomplete this is a no-op and
+            # run() resumes this same group at its first incomplete set.
+            self.advance_group()
+            return False
+        # Group-level jump: never clears progress. A skipped group becomes
+        # playable again, and play resumes at its first incomplete set
+        # (jump_to's rounds_completed arithmetic).
+        group.skipped = False
+        self.jump_to(target.phase_idx, target.group_idx)
+        return False
+
+    def play_single_set(self, live: Live, target: JumpTarget) -> None:
+        """Play exactly one exercise's set slot (a set-level jump).
+
+        For a superset this is one exercise of the round, not the whole
+        round — the spec-free way to do one side of a unilateral exercise.
+        The result is recorded exactly like normal play (actual_reps /
+        failure, state saved); the caller then returns to the normal flow
+        instead of continuing the group. SKIP/BACK/JUMP mid-set abandon the
+        detour without recording anything (and without skip-flagging the
+        group)."""
+        pi, gi = target.phase_idx, target.group_idx
+        group = self.cassette.phases[pi].groups[gi]
+        ex = group.exercises[target.ex_idx]
+        set_data = ex.sets[target.round_idx]
+        self.phase_idx, self.group_idx = pi, gi
+        self.round_idx, self.ex_idx = target.round_idx, target.ex_idx
+        r = target.round_idx
+
+        if ex.timed:
+            ev = timed_hold(
+                live, self.cassette, pi, gi, group, ex, r, target.ex_idx,
+                self.avg_rep_set(),
+                now=self.now, read_key=self.read_key, sleep=self.sleep,
+            )
+            if ev is not Event.DONE:
+                return
+            set_data.actual_reps = set_data.reps
+        else:
+            set_start = self.now()
+            ev, paused_secs = rep_set_screen(
+                live, self.cassette, pi, gi, group, ex, r, target.ex_idx,
+                self.avg_rep_set(),
+                now=self.now, read_key=self.read_key, sleep=self.sleep,
+            )
+            if ev in (Event.SKIP, Event.BACK, Event.JUMP):
+                return
+            if ev is Event.FAIL:
+                actual = get_failure_reps(
+                    live, self.cassette, pi, gi, group, ex, r, target.ex_idx,
+                    set_data.reps, self.avg_rep_set(),
+                    now=self.now, read_key=self.read_key, sleep=self.sleep,
+                )
+                set_data.actual_reps = actual
+                set_data.failure = True
+            else:
+                set_data.actual_reps = set_data.reps
+            self.rep_set_durations.append(self.now() - set_start - paused_secs)
+
+        # Only now that a set was actually performed does the detour revive a
+        # skipped group — an abandoned detour (the early returns above) must
+        # leave an explicit skip untouched.
+        group.skipped = False
+        play_sound(sound_set_complete())
+        if not set_data.failure:
+            celebrate(self.now())
+        if group_done(group):
+            # This set filled the group's last missing slot: give it the same
+            # group-complete fanfare as normal play (the subsequent play_group
+            # re-entry sees it already complete and deliberately stays silent).
+            speak(group.voice_group_complete)
+            play_sound(sound_group_complete())
+            celebrate(self.now())
+        self._save_state(
+            {"phase_idx": pi, "group_idx": gi, "round_idx": rounds_completed(group)},
+        )
+
     def play_group(self, live: Live, via_back: bool = False) -> Event:
         """Play the group under the playhead from its first incomplete set.
-        Returns DONE when the group finished or was skipped, BACK on 'b'."""
+        Returns DONE when the group finished or was skipped, BACK on 'b',
+        JUMP on 'j' (the in-flight set is not recorded in either case)."""
         group = self.current_group()
         pi, gi = self.phase_idx, self.group_idx
         self.round_idx = rounds_completed(group)
@@ -201,6 +328,9 @@ class Player:
                 )
                 if ev is Event.BACK:
                     return Event.BACK
+                if ev is Event.JUMP:
+                    self._jump_resume_via_back = True  # cancel re-shows this screen
+                    return Event.JUMP
                 if ev is not Event.REDO:
                     return Event.DONE
                 clear_group_progress(group)
@@ -216,6 +346,11 @@ class Player:
             )
             if ev is Event.BACK:
                 return Event.BACK
+            if ev is Event.JUMP:
+                # Nothing has started yet: a cancelled menu should land back
+                # on this setup screen, not mid-group.
+                self._jump_resume_via_back = False
+                return Event.JUMP
             if ev is Event.SKIP:
                 group.skipped = True
                 return Event.DONE
@@ -226,26 +361,37 @@ class Player:
 
         # If 'b' interrupted this group's rest period, restart the rest now
         # instead of dropping the user straight into the next set.
-        if self._pending_rest == (pi, gi) and 0 < self.round_idx < group.rounds:
-            self._pending_rest = None
+        if (pi, gi) in self._pending_rest and 0 < self.round_idx < group.rounds:
+            self._pending_rest.discard((pi, gi))
             ev = rest_timer(
                 live, self.cassette, pi, gi, group.rest, self.avg_rep_set(),
                 now=self.now, read_key=self.read_key, sleep=self.sleep,
             )
             if ev is Event.SKIP:
                 return self._skip_group(group, self.round_idx)
-            if ev is Event.BACK:
-                self._pending_rest = (pi, gi)
-                return Event.BACK
-        else:
-            self._pending_rest = None
+            if ev in (Event.BACK, Event.JUMP):
+                # Jumping away during a rest behaves exactly like BACK: the
+                # rest stays pending, so returning to this group mid-round
+                # restarts it rather than dropping straight into the next set.
+                self._pending_rest.add((pi, gi))
+                self._jump_resume_via_back = True
+                return ev
+        elif (pi, gi) in self._pending_rest:
+            # A pending rest for THIS group that no longer applies (round 0
+            # after a redo, or the group completed elsewhere): drop it. A
+            # pending rest for a DIFFERENT group deliberately survives playing
+            # this one — jumping away mid-rest and doing other work doesn't
+            # waive the rest still owed before that group's next set.
+            self._pending_rest.discard((pi, gi))
 
+        played_in_round = False
         while self.round_idx < group.rounds:
             r = self.round_idx
             ex = group.exercises[self.ex_idx]
             set_data = ex.sets[r]
 
             if set_data.actual_reps is None:
+                played_in_round = True
                 if ex.timed:
                     ev = timed_hold(
                         live, self.cassette, pi, gi, group, ex, r, self.ex_idx,
@@ -268,6 +414,10 @@ class Player:
                         return self._skip_group(group, r)
                     if ev is Event.BACK:
                         return Event.BACK
+                    if ev is Event.JUMP:
+                        # The in-flight set simply isn't recorded, same as BACK.
+                        self._jump_resume_via_back = True
+                        return Event.JUMP
                     if ev is Event.FAIL:
                         actual = get_failure_reps(
                             live, self.cassette, pi, gi, group, ex, r, self.ex_idx,
@@ -290,19 +440,18 @@ class Player:
             last_in_round = self.ex_idx == len(group.exercises) - 1
             self.advance_set()
 
-            if last_in_round:
+            if last_in_round and played_in_round:
                 # Round complete (same failure gate: for straight sets this
                 # fires in the same instant as the set-complete stamp above,
                 # so it must not reopen the celebration window either).
+                # A round whose sets were all recorded earlier (set-level
+                # jumps) is passed over silently: no announcement, no chime,
+                # no save, and no second rest with no work in between.
                 speak_round_complete(group, r)
                 play_sound(sound_set_complete())
                 if not set_data.failure:
                     celebrate(self.now())
-                save_state(
-                    self.cassette,
-                    {"phase_idx": pi, "group_idx": gi, "round_idx": r + 1},
-                    self.cassette_path,
-                )
+                self._save_state({"phase_idx": pi, "group_idx": gi, "round_idx": r + 1})
 
                 # Rest (not after the group's final round)
                 if r < group.rounds - 1:
@@ -312,12 +461,15 @@ class Player:
                     )
                     if ev is Event.SKIP:
                         return self._skip_group(group, r + 1)
-                    if ev is Event.BACK:
+                    if ev in (Event.BACK, Event.JUMP):
                         # Remember the interrupted rest so re-entering this
                         # group restarts it rather than skipping straight to
-                        # the next set.
-                        self._pending_rest = (pi, gi)
-                        return Event.BACK
+                        # the next set (BACK and JUMP alike).
+                        self._pending_rest.add((pi, gi))
+                        self._jump_resume_via_back = True
+                        return ev
+            if last_in_round:
+                played_in_round = False
 
         # Group complete
         if not group.skipped:
@@ -329,12 +481,14 @@ class Player:
     def _skip_group(self, group: Group, round_idx: int) -> Event:
         group.skipped = True
         say(f"Skipping {group.exercises[0].name}")
-        save_state(
-            self.cassette,
+        self._save_state(
             {"phase_idx": self.phase_idx, "group_idx": self.group_idx, "round_idx": round_idx},
-            self.cassette_path,
         )
         return Event.DONE
+
+    def _save_state(self, position: dict) -> None:
+        if self.persist_state:
+            save_state(self.cassette, position, self.cassette_path)
 
 
 # ---------------------------------------------------------------------------
@@ -380,3 +534,45 @@ def play_cassette(
     print_log(cassette)
     save_log(cassette)
     clear_state()
+
+
+def play_only_group(
+    cassette: Cassette,
+    phase_idx: int,
+    group_idx: int,
+    label: str,
+    *,
+    now: Callable[[], float] = time.time,
+    read_key: Callable[[], str] | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    """Play a single group start-to-finish (--only), log a partial session.
+
+    Design choices (recommendations §3):
+    - State persistence is OFF (``persist_state=False``): an --only run must
+      never clobber a saved full-session state — the state file is left
+      byte-identical.
+    - The jump menu is effectively absent: there is nowhere else to go, so
+      'j' (like 'b') just bounces back into the group; mid-group re-entry
+      resumes at the first incomplete set and an interrupted rest restarts
+      via the pending-rest machinery.
+    - Ctrl-C / Ctrl-Z end the run (nothing to resume without state); the
+      partial log entry is still written.
+    """
+    console = Console()
+    player = Player(
+        cassette, None, now=now, read_key=read_key, sleep=sleep,
+        persist_state=False,
+    )
+    player.jump_to(phase_idx, group_idx)
+    group = player.current_group()
+    try:
+        with Live(console=console, refresh_per_second=4, screen=True) as live:
+            while not group_done(group):
+                player.play_group(live)
+    except (KeyboardInterrupt, WorkoutPaused):
+        restore_terminal()
+        terminate_say()
+        console.print("\n[yellow]Stopped.[/yellow]")
+    print("\n" + render_partial_log(cassette, phase_idx, group_idx) + "\n")
+    save_partial_log(cassette, phase_idx, group_idx, label)

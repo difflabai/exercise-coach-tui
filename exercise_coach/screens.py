@@ -23,6 +23,7 @@ from .audio import play_sound, sound_rest_done, stop_sounds
 from .audio import settings as audio_settings
 from .buddy import Mood
 from .events import Event
+from .jumpmenu import JumpMenuState, JumpTarget, render_jump_panel
 from .models import Cassette, ExerciseData, Group, TimedCue
 from .term import (
     WorkoutPaused,
@@ -198,6 +199,54 @@ def _make_pause(
 
 
 # ---------------------------------------------------------------------------
+# Jump menu overlay
+# ---------------------------------------------------------------------------
+
+def jump_menu_screen(
+    live: Live, cassette: Cassette, cur_phase: int, cur_group: int,
+    avg_rep_set: float = 30.0,
+    *,
+    now: Callable[[], float] = time.time,
+    read_key: Callable[[], str] | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+) -> JumpTarget | None:
+    """Show the jump-menu overlay. Returns the chosen JumpTarget (group- or
+    set-level, redo-flagged after a 'y' confirmation) or None on cancel.
+
+    All menu logic lives in the pure JumpMenuState; this loop only feeds it
+    keys via char_handler and renders. Rendering goes through render_layout
+    (mood READY) so the global volume keys and footer stay live; 'p' pause is
+    deliberately absent here (the menu itself is already a stopping point).
+    """
+    state = JumpMenuState(cassette, cur_phase, cur_group)
+    result: dict = {"action": None}
+
+    def tick() -> Event | None:
+        # char_handler can't end run_screen directly; it parks the resolving
+        # action here and the next tick ends the screen.
+        return Event.DONE if result["action"] is not None else None
+
+    def render() -> None:
+        overview = build_overview(cassette, cur_phase, cur_group)
+        render_layout(live, overview, render_jump_panel(state),
+                      build_progress_bar(cassette, avg_rep_set),
+                      mood=Mood.READY, now=now())
+
+    def on_char(key: str) -> None:
+        action = state.handle_key(key)
+        if action is not None:
+            result["action"] = action
+
+    run_screen(
+        live, render, {}, tick=tick,
+        now=now, read_key=read_key, sleep=sleep,
+        char_handler=on_char, poll=0.1,
+    )
+    kind, target = result["action"]
+    return target if kind != "cancel" else None
+
+
+# ---------------------------------------------------------------------------
 # Transition (setup) screen between groups
 # ---------------------------------------------------------------------------
 
@@ -227,17 +276,20 @@ def transition_screen(
         content = "[bold green]Already completed:[/bold green]\n" + "\n".join(exercises_desc)
         content += (
             "\n\n[dim]Enter = continue  •  r = redo (clears this group's progress)"
-            "  •  b = back[/dim]"
+            "  •  b = back  •  j = jump[/dim]"
         )
-        keymap = {"enter": Event.DONE, "s": Event.DONE, "r": Event.REDO, "b": Event.BACK}
+        keymap = {
+            "enter": Event.DONE, "s": Event.DONE, "r": Event.REDO,
+            "b": Event.BACK, "j": Event.JUMP,
+        }
         title = "Group complete"
         border = "green"
     else:
         content = "[bold cyan]Next up:[/bold cyan]\n" + "\n".join(exercises_desc)
         if group.setup:
             content += f"\n\n[yellow]{group.setup}[/yellow]"
-        content += "\n\n[dim]Enter = ready  •  s = skip  •  b = back[/dim]"
-        keymap = {"enter": Event.DONE, "s": Event.SKIP, "b": Event.BACK}
+        content += "\n\n[dim]Enter = ready  •  s = skip  •  b = back  •  j = jump[/dim]"
+        keymap = {"enter": Event.DONE, "s": Event.SKIP, "b": Event.BACK, "j": Event.JUMP}
         title = "Setup"
         border = "cyan"
 
@@ -336,7 +388,7 @@ def rest_timer(
 
     return run_screen(
         live, render,
-        {"enter": Event.DONE, "s": Event.SKIP, "b": Event.BACK},
+        {"enter": Event.DONE, "s": Event.SKIP, "b": Event.BACK, "j": Event.JUMP},
         tick=tick, now=now, read_key=read_key, sleep=sleep,
         pause=_make_pause(live, cassette, cur_phase, cur_group, avg_rep_set,
                           now, read_key, sleep, on_paused),
@@ -447,7 +499,7 @@ def rep_set_screen(
     """Wait for the user to finish a rep-based set.
     Returns (event, total seconds spent paused) so the caller can measure
     active set duration. Event is DONE, FAIL, SKIP, or BACK."""
-    key_hint = "Enter = done  •  f = failed  •  s = skip  •  b = back  •  p = pause  •  m/-/+ vol"
+    key_hint = "Enter = done  •  f = failed  •  s = skip  •  b = back  •  j = jump  •  p = pause  •  m/-/+ vol"
     paused = {"secs": 0.0}
 
     def render() -> None:
@@ -463,7 +515,8 @@ def rep_set_screen(
 
     ev = run_screen(
         live, render,
-        {"enter": Event.DONE, "f": Event.FAIL, "s": Event.SKIP, "b": Event.BACK},
+        {"enter": Event.DONE, "f": Event.FAIL, "s": Event.SKIP,
+         "b": Event.BACK, "j": Event.JUMP},
         now=now, read_key=read_key, sleep=sleep,
         pause=_make_pause(live, cassette, cur_phase, cur_group, avg_rep_set,
                           now, read_key, sleep, on_paused),
@@ -499,7 +552,9 @@ def get_failure_reps(
                       mood=Mood.WORKING, now=now())
 
     def on_char(key: str) -> None:
-        if key.isdigit():
+        # ASCII only: isdigit() also accepts '²' etc., which the int() below
+        # would crash on — non-ASCII digits are simply ignored.
+        if key.isascii() and key.isdigit():
             state["digits"] += key
         elif key == "\x7f" and state["digits"]:  # backspace
             state["digits"] = state["digits"][:-1]

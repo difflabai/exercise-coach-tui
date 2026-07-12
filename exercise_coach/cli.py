@@ -19,8 +19,9 @@ from .cassette import (
     read_input,
     rounds_completed,
 )
+from .jumpmenu import build_jump_rows, match_only
 from .models import Cassette
-from .player import play_cassette
+from .player import play_cassette, play_only_group
 from .state import (
     apply_state,
     clear_state,
@@ -126,6 +127,12 @@ def main() -> None:
         help="Turn the buddy coach panel back on (persisted, like --no-buddy)",
     )
     parser.set_defaults(buddy=None)
+    parser.add_argument(
+        "--only", metavar="NAME|N", default=None,
+        help="Play a single group and exit: case-insensitive exercise-name substring, or "
+             "1-based jump-menu row number. Logs a partial session; never touches (or "
+             "resumes) a saved full-session state.",
+    )
     parser.add_argument("--resume", action="store_true", help="Resume last workout without prompting")
     parser.add_argument("--reset", "--restart", action="store_true", help="Discard saved state and exit")
     parser.add_argument("--log", action="store_true", help="Print current saved log and exit")
@@ -172,6 +179,31 @@ def main() -> None:
         cassette, _ = parse_input(text, rest)
         apply_state(cassette, state)
         print(render_log(cassette))
+        return
+
+    if args.only is not None:
+        # --only: play one group, log it as a partial session, exit. This
+        # path never calls try_resume and the player runs with state
+        # persistence off, so a saved full-session state stays untouched.
+        text = read_input(args.file)
+        cassette, is_json = parse_input(text, rest)
+        if not cassette.phases or not any(g for p in cassette.phases for g in p.groups):
+            print("No exercises parsed. Check your input format.", file=sys.stderr)
+            sys.exit(1)
+        if not is_json or args.rest is not None:
+            for phase in cassette.phases:
+                for group in phase.groups:
+                    group.rest = rest
+        rows = build_jump_rows(cassette, -1, -1)
+        matches = match_only(rows, args.only)
+        if len(matches) != 1:
+            kind = "No group matches" if not matches else "Multiple groups match"
+            print(f"{kind} --only {args.only!r}. Groups:", file=sys.stderr)
+            for i, row in enumerate(rows, 1):
+                print(f"  {i}. {row.label}", file=sys.stderr)
+            sys.exit(2)
+        row = matches[0]
+        play_only_group(cassette, row.phase_idx, row.group_idx, row.label)
         return
 
     cassette_path = None

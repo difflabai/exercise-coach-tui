@@ -415,7 +415,7 @@ def test_skip_during_restarted_pending_rest_saves_current_round(make_player):
 
     h.keys.push("enter", "enter", "b")  # G2: transition, set 1, 'b' during rest
     assert h.play_group() is Event.BACK
-    assert h.player._pending_rest == (0, 1)
+    assert h.player._pending_rest == {(0, 1)}
 
     assert h.player.previous_group()
     h.keys.push("enter")
@@ -443,7 +443,7 @@ def test_back_during_restarted_pending_rest_rearms_it(make_player):
 
     h.keys.push("enter", "enter", "b")  # G2: 'b' during the post-round rest
     assert h.play_group() is Event.BACK
-    assert h.player._pending_rest == (0, 1)
+    assert h.player._pending_rest == {(0, 1)}
 
     assert h.player.previous_group()
     h.keys.push("enter")
@@ -452,7 +452,7 @@ def test_back_during_restarted_pending_rest_rearms_it(make_player):
 
     h.keys.push("b")  # 'b' again, during the *restarted* rest
     assert h.play_group() is Event.BACK
-    assert h.player._pending_rest == (0, 1)  # re-armed, not dropped
+    assert h.player._pending_rest == {(0, 1)}  # re-armed, not dropped
 
     assert h.player.previous_group()
     h.keys.push("enter")
@@ -461,7 +461,7 @@ def test_back_during_restarted_pending_rest_rearms_it(make_player):
 
     h.keys.push("enter", "enter")  # end the (third) rest, then set 2
     assert h.play_group() is Event.DONE
-    assert h.player._pending_rest is None
+    assert h.player._pending_rest == set()
     row = h.cassette.phases[0].groups[1].exercises[0]
     assert [s.actual_reps for s in row.sets] == [5, 5]  # set 2 played exactly once
 

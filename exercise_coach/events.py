@@ -15,3 +15,4 @@ class Event(Enum):
     SUSPEND = auto()  # suspend to shell (normally raised as WorkoutPaused)
     FAIL = auto()     # rep set failed; collect actual reps next
     REDO = auto()     # explicitly replay a completed group (clears its progress)
+    JUMP = auto()     # open the jump menu (recommendations §3)
