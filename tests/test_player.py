@@ -9,10 +9,9 @@ one per rep set, and one to end each rest (rests happen between rounds, so
 rounds - 1 of them).
 """
 
-import json
-
 from conftest import FakeClock, ScriptedKeys
 
+from exercise_coach import history
 from exercise_coach import state as state_mod
 from exercise_coach.cassette import count_sets, load_cassette_from_dict, rounds_completed
 from exercise_coach.events import Event
@@ -706,6 +705,9 @@ def test_play_cassette_already_complete_short_circuits(no_audio, capsys):
     assert "Squat" in log
     assert not state_mod.STATE_FILE.exists()  # re-runs won't append more entries
     assert no_audio.spoken == []  # no session intro/complete voice either
+    # No history record either: no workout happened in this run, and a
+    # 0-duration full record would become the next session's bogus baseline.
+    assert history.read_records() == []
 
 
 # ---------------------------------------------------------------------------
@@ -783,7 +785,7 @@ def test_session_end_persists_median_pace_and_primes_next_session(no_audio):
 
     play_cassette(cass, now=clock.now, read_key=keys, sleep=clock.sleep)
 
-    data = json.loads(user_settings.settings_file().read_text())
+    data = user_settings.load_data()
     assert data["paces"] == {"Squat": 20}      # the median, rounded
     assert data["volume"] == 0.5               # other keys untouched
     assert data["buddy"] is False
@@ -806,7 +808,7 @@ def test_only_run_persists_paces_too(no_audio):
     play_only_group(cass, 0, 0, "Row", now=clock.now, read_key=keys, sleep=clock.sleep)
 
     assert user_settings.paces == {"Row": 12}
-    assert json.loads(user_settings.settings_file().read_text())["paces"] == {"Row": 12}
+    assert user_settings.load_data()["paces"] == {"Row": 12}
 
 
 def test_failure_prompt_time_is_excluded_from_learned_pace(make_player):

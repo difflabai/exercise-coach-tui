@@ -1,6 +1,7 @@
 """State persistence and log output."""
 
 import json
+import math
 import os
 import shutil
 import sys
@@ -50,8 +51,18 @@ def migrate_legacy_files() -> None:
 # State persistence
 # ---------------------------------------------------------------------------
 
-def save_state(cassette: Cassette, position: dict, cassette_path: str | None = None) -> None:
-    """Save current playback state."""
+def save_state(
+    cassette: Cassette,
+    position: dict,
+    cassette_path: str | None = None,
+    *,
+    session_elapsed: float = 0.0,
+) -> None:
+    """Save current playback state.
+
+    `session_elapsed` is the active seconds already worked this session —
+    the CLI's Ctrl-C/Ctrl-Z handlers pass it so a resumed session's history
+    record can cover the whole workout, not just the final segment."""
     groups_state = []
     for pi, phase in enumerate(cassette.phases):
         for gi, group in enumerate(phase.groups):
@@ -88,6 +99,7 @@ def save_state(cassette: Cassette, position: dict, cassette_path: str | None = N
         "cassette_source": cassette_source,
         "position": position,
         "groups_state": groups_state,
+        "session_elapsed": round(session_elapsed, 1),
     }
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     STATE_FILE.write_text(json.dumps(data, indent=2))
@@ -124,6 +136,20 @@ def apply_state(cassette: Cassette, state: dict) -> dict:
                 break
 
     return state.get("position", {"phase_idx": 0, "group_idx": 0, "round_idx": 0})
+
+
+def saved_session_elapsed(state: dict | None) -> float:
+    """The active-work seconds recorded in a saved state; 0.0 when absent or
+    invalid (older state files, hand-edits)."""
+    value = (state or {}).get("session_elapsed", 0)
+    if (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and value > 0
+    ):
+        return float(value)
+    return 0.0
 
 
 def clear_state() -> None:

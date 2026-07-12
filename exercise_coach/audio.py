@@ -251,6 +251,14 @@ def sound_rest_done() -> bytes:
     return _generate_tone(1047, 300, 1.0)  # C5 ping when rest finishes
 
 
+@functools.cache
+def sound_rest_warning() -> bytes:
+    # Pre-rest-end tick at T-5s (recommendations §7): a single soft E5 blip,
+    # deliberately shorter and quieter than the rest-done ding — generated
+    # below full amplitude, then scaled by the master volume like every tone.
+    return _generate_tone(660, 120, 0.4)
+
+
 def play_sound(sound_data: bytes) -> None:
     """Play a WAV sound from bytes (non-blocking), scaled to the master volume.
 

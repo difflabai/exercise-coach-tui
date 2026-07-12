@@ -6,10 +6,9 @@ Console(record=True)/export_text, narrow-width collapse, per-screen mood
 selection (screens driven headlessly with a fake clock + scripted keys), the
 transient celebration window stamped by the player, caption-to-speech-bubble
 routing (and the classic caption row when the buddy is off or no mood is
-passed), and --no-buddy/--buddy persistence via settings.json.
+passed), and --no-buddy/--buddy persistence via config.toml.
 """
 
-import json
 from io import StringIO
 
 from rich.console import Console
@@ -420,7 +419,7 @@ class TestBuddyPersistence:
         monkeypatch.setattr("sys.argv", ["coach", "--no-buddy", "--reset"])
         cli.main()
         assert user_settings.buddy_enabled is False
-        data = json.loads((isolated_state / "settings.json").read_text())
+        data = user_settings.load_data()
         assert data["buddy"] is False
         assert data["volume"] == 0.9  # merge-write: the saved volume survives
 
@@ -436,8 +435,7 @@ class TestBuddyPersistence:
         monkeypatch.setattr("sys.argv", ["coach", "--buddy", "--reset"])
         cli.main()
         assert user_settings.buddy_enabled is True
-        data = json.loads((isolated_state / "settings.json").read_text())
-        assert data["buddy"] is True
+        assert user_settings.load_data()["buddy"] is True
 
     def test_no_flag_keeps_default_on_and_writes_nothing(
         self, isolated_state, monkeypatch, capsys,
@@ -445,7 +443,7 @@ class TestBuddyPersistence:
         monkeypatch.setattr("sys.argv", ["coach", "--reset"])
         cli.main()
         assert user_settings.buddy_enabled is True
-        assert not (isolated_state / "settings.json").exists()
+        assert not user_settings.config_file().exists()
 
     def test_load_with_missing_key_keeps_default(self, isolated_state):
         user_settings.load_buddy_enabled()

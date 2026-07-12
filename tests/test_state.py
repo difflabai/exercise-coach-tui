@@ -95,6 +95,26 @@ class TestStateRoundTrip:
         assert saved["cassette_path"] == ""
         assert saved["cassette_source"] == '{"the": "original text"}'
 
+    def test_save_state_records_session_elapsed(self, fixture_cassette):
+        """The Ctrl-C/Ctrl-Z handlers persist the active seconds already
+        worked so a resumed session's history duration covers the whole
+        workout, not just the final segment."""
+        cassette = fixture_cassette("straight")
+        state.save_state(cassette, {"phase_idx": 0}, session_elapsed=123.44)
+        assert state.saved_session_elapsed(state.load_state_data()) == 123.4
+
+        state.save_state(cassette, {"phase_idx": 0})  # default: none worked
+        assert state.saved_session_elapsed(state.load_state_data()) == 0.0
+
+    def test_saved_session_elapsed_tolerates_missing_or_invalid(self):
+        for bad in (
+            None, {}, {"session_elapsed": "long"}, {"session_elapsed": -5},
+            {"session_elapsed": True}, {"session_elapsed": float("inf")},
+            {"session_elapsed": float("nan")},
+        ):
+            assert state.saved_session_elapsed(bad) == 0.0
+        assert state.saved_session_elapsed({"session_elapsed": 90}) == 90.0
+
     def test_save_state_creates_data_dir(self, fixture_cassette):
         assert not state.DATA_DIR.exists()
         state.save_state(fixture_cassette("straight"), {"phase_idx": 0})

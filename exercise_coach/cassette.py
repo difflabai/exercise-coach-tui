@@ -97,10 +97,13 @@ def load_cassette(path: str) -> Cassette:
     return load_cassette_from_dict(json.loads(Path(path).read_text()))
 
 
-def load_cassette_from_dict(data: dict) -> Cassette:
+def load_cassette_from_dict(data: dict, rest_fallback: int = 75) -> Cassette:
     """Build a Cassette from a parsed JSON dict.
 
     Unknown fields anywhere are silently ignored (forward compat).
+    `rest_fallback` applies only when neither the group nor meta.rest_default
+    provides a rest (an out-of-spec but tolerated cassette) — the CLI passes
+    the persisted rest_default here so the config's promise holds even then.
     """
     version = data.get("version", "1.0")
     if version not in KNOWN_VERSIONS:
@@ -110,7 +113,7 @@ def load_cassette_from_dict(data: dict) -> Cassette:
             file=sys.stderr,
         )
 
-    rest_default = data.get("meta", {}).get("rest_default", 75)
+    rest_default = data.get("meta", {}).get("rest_default", rest_fallback)
 
     phases = []
     for phase_data in data.get("phases", []):
@@ -270,13 +273,17 @@ def read_input(file_path: str | None) -> str:
 
 
 def parse_input(text: str, rest: int) -> tuple[Cassette, bool]:
-    """Parse input text. Returns (cassette, is_json). Tries JSON first, then text format."""
+    """Parse input text. Returns (cassette, is_json). Tries JSON first, then text format.
+
+    `rest` is used for every text-input group, and as the last-resort
+    fallback for JSON groups when neither the group nor meta.rest_default
+    names one (so the persisted rest_default reaches such cassettes too)."""
     stripped = text.strip()
     if stripped.startswith("{"):
         try:
             data = json.loads(stripped)
             if "phases" in data:
-                c = load_cassette_from_dict(data)
+                c = load_cassette_from_dict(data, rest_fallback=rest)
                 c._source = text
                 return c, True
         except (json.JSONDecodeError, KeyError, TypeError):

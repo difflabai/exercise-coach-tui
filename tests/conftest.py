@@ -21,6 +21,10 @@ from pathlib import Path
 # throwaway dir before anything imports exercise_coach. (isolated_state then
 # re-points the module constants at the per-test tmp_path.)
 os.environ["XDG_DATA_HOME"] = tempfile.mkdtemp(prefix="exercise-coach-tests-xdg-")
+# settings.py resolves config.toml from XDG_CONFIG_HOME live on every call,
+# but set a throwaway here too so nothing can ever touch the real ~/.config
+# (isolated_state then re-points it at the per-test tmp_path).
+os.environ["XDG_CONFIG_HOME"] = tempfile.mkdtemp(prefix="exercise-coach-tests-xdg-config-")
 
 # Color-forcing env vars make Rich emit ANSI into capsys regardless of the
 # fake terminals the tests set up (e.g. `FORCE_COLOR=3 pytest` broke the
@@ -55,15 +59,17 @@ _COLOR_ENV_VARS = ("FORCE_COLOR", "NO_COLOR", "CLICOLOR_FORCE", "COLORTERM")
 
 @pytest.fixture(autouse=True)
 def isolated_state(monkeypatch, tmp_path):
-    """Point every state/log path at tmp_path. Returns the data dir.
+    """Point every state/log/config path at tmp_path. Returns the data dir.
 
     state.py computes DATA_DIR/STATE_FILE/LOG_FILE at import time, so the
     module attributes are patched directly; all state functions read them as
     module globals. _LEGACY_DIR is patched too so migrate_legacy_files can
-    never move files out of the real repo root.
+    never move files out of the real repo root. settings.py's config.toml
+    path reads XDG_CONFIG_HOME live, so the env override is enough there.
     """
     data_dir = tmp_path / "exercise-coach-data"
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-config"))
     monkeypatch.setattr(state, "DATA_DIR", data_dir)
     monkeypatch.setattr(state, "STATE_FILE", data_dir / ".workout_state.json")
     monkeypatch.setattr(state, "LOG_FILE", data_dir / "workout_log.txt")
@@ -92,23 +98,29 @@ def reset_audio_settings():
     audio.settings.muted = False
 
 
+_DEFAULT_PIPER_VOICE = tts.PIPER_PREFERRED_VOICE
+
+
 @pytest.fixture(autouse=True)
 def reset_buddy_state():
     """buddy.py's celebrate-until timestamp, settings.py's buddy flag and
-    paces map, and ui.py's pending-rests set are process-global mutable
-    state — reset all of them around every test (mirrors
-    reset_audio_settings; the player stamps celebrate() on every set,
-    update_paces() at session end, and binds its live _pending_rest set
-    into ui.pending_rests at construction)."""
+    paces map, ui.py's pending-rests set, and tts.py's preferred voice are
+    process-global mutable state — reset all of them around every test
+    (mirrors reset_audio_settings; the player stamps celebrate() on every
+    set, update_paces() at session end, binds its live _pending_rest set
+    into ui.pending_rests at construction, and cli.main feeds the config
+    voice into tts)."""
     buddy.reset()
     user_settings.buddy_enabled = True
     user_settings.paces = {}
     ui.pending_rests = set()
+    tts.PIPER_PREFERRED_VOICE = _DEFAULT_PIPER_VOICE
     yield
     buddy.reset()
     user_settings.buddy_enabled = True
     user_settings.paces = {}
     ui.pending_rests = set()
+    tts.PIPER_PREFERRED_VOICE = _DEFAULT_PIPER_VOICE
 
 
 class AudioLog:
@@ -116,7 +128,7 @@ class AudioLog:
 
     - ``spoken``: every TTS line, in order (say/say_sync/speak all funnel here).
     - ``sounds``: marker byte-strings for each chime, in order:
-      b"set_complete", b"group_complete", b"rest_done".
+      b"set_complete", b"group_complete", b"rest_done", b"rest_warning".
     """
 
     def __init__(self) -> None:
@@ -166,6 +178,7 @@ def no_audio(monkeypatch):
     monkeypatch.setattr(player_mod, "sound_set_complete", lambda: b"set_complete")
     monkeypatch.setattr(player_mod, "sound_group_complete", lambda: b"group_complete")
     monkeypatch.setattr(screens, "sound_rest_done", lambda: b"rest_done")
+    monkeypatch.setattr(screens, "sound_rest_warning", lambda: b"rest_warning")
 
     return log
 

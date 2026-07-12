@@ -2,7 +2,6 @@
 pace persistence, progress-bar math, and overview rendering (Rich snapshot
 substrings)."""
 
-import json
 from io import StringIO
 
 from rich.console import Console
@@ -188,7 +187,7 @@ class TestPaceSettings:
         user_settings.update_paces({"Row": 28})
         user_settings.update_paces({"Row": 25, "Curl": 19})
 
-        data = json.loads(user_settings.settings_file().read_text())
+        data = user_settings.load_data()
         assert data["paces"] == {"Row": 25, "Curl": 19}
         assert data["volume"] == 0.5
         assert data["buddy"] is False
@@ -201,13 +200,13 @@ class TestPaceSettings:
         assert "Noise" not in user_settings.paces
 
     def test_infinity_and_nan_in_file_are_dropped_not_crashes(self, isolated_state):
-        """json.loads accepts Infinity/NaN/1e999 — a hand-edited or corrupt
-        file must never crash startup (load_paces) or the session-end
-        update_paces merge with an OverflowError."""
-        path = user_settings.settings_file()
+        """TOML accepts inf/nan/1e999 floats — a hand-edited file must never
+        crash startup (load_paces) or the session-end update_paces merge
+        with an OverflowError."""
+        path = user_settings.config_file()
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
-            '{"paces": {"RDL": Infinity, "Curl": NaN, "Big": 1e999, "Good": 20}}'
+            "[paces]\nRDL = inf\nCurl = nan\nBig = 1e999\nGood = 20\n"
         )
         user_settings.load_paces()
         assert user_settings.paces == {"Good": 20}

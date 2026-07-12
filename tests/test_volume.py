@@ -7,7 +7,6 @@ and the global '-'/'+'/'='/'m' keys in run_screen.
 """
 
 import io
-import json
 import math
 import struct
 import subprocess as real_subprocess
@@ -18,6 +17,7 @@ import wave
 import pytest
 
 from exercise_coach import audio, cli, screens, tts, ui
+from exercise_coach import settings as user_settings
 from exercise_coach.audio import AudioSettings, scale_pcm
 from exercise_coach.cassette import load_cassette_from_dict
 from exercise_coach.events import Event
@@ -337,6 +337,14 @@ class TestSkipAtZero:
 # Persistence
 # ---------------------------------------------------------------------------
 
+def write_config(text: str):
+    """Write raw TOML to the (test-isolated) config.toml; returns the path."""
+    path = user_settings.config_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    return path
+
+
 class TestPersistence:
     def test_round_trip(self, isolated_state):
         audio.settings.volume = 0.3
@@ -348,18 +356,19 @@ class TestPersistence:
         assert audio.settings.volume == 0.3
         assert audio.settings.muted is True
 
-    def test_settings_live_next_to_state(self, isolated_state):
+    def test_settings_live_in_config_toml(self, isolated_state):
         audio.save_settings()
-        assert (isolated_state / "settings.json").exists()
+        assert user_settings.config_file().exists()
+        assert user_settings.config_file().name == "config.toml"
 
     def test_step_persists_only_the_volume_key(self, isolated_state):
         audio.settings.step_down()
-        data = json.loads((isolated_state / "settings.json").read_text())
+        data = user_settings.load_data()
         assert data == {"volume": 0.6}  # merge-write: untouched keys stay absent
 
     def test_toggle_mute_persists_on_change(self, isolated_state):
         audio.settings.toggle_mute()
-        data = json.loads((isolated_state / "settings.json").read_text())
+        data = user_settings.load_data()
         assert data["muted"] is True
 
     def test_mute_press_does_not_persist_transient_volume_flag(self, isolated_state):
@@ -369,14 +378,14 @@ class TestPersistence:
         audio.save_settings()
         audio.settings.set_volume(0.45)  # what the CLI flag does
         audio.settings.toggle_mute()     # the 'm' key
-        data = json.loads((isolated_state / "settings.json").read_text())
+        data = user_settings.load_data()
         assert data == {"volume": 0.9, "muted": True}
 
     def test_volume_step_does_not_persist_transient_mute_flag(self, isolated_state):
         audio.save_settings()  # persisted: 0.7, unmuted
         audio.settings.muted = True  # what --mute does
         audio.settings.step_down()   # the '-' key
-        data = json.loads((isolated_state / "settings.json").read_text())
+        data = user_settings.load_data()
         assert data == {"volume": 0.6, "muted": False}
 
     def test_missing_file_keeps_defaults(self, isolated_state):
@@ -384,33 +393,21 @@ class TestPersistence:
         assert audio.settings.volume == 0.7
         assert audio.settings.muted is False
 
-    def test_corrupt_file_keeps_defaults(self, isolated_state):
-        isolated_state.mkdir(parents=True, exist_ok=True)
-        (isolated_state / "settings.json").write_text("{not json")
+    @pytest.mark.parametrize("content", ["{not toml", "volume =", "= 0.5", "null"])
+    def test_corrupt_file_keeps_defaults(self, isolated_state, content):
+        write_config(content)
         audio.load_settings()
         assert audio.settings.volume == 0.7
         assert audio.settings.muted is False
 
-    @pytest.mark.parametrize("content", ["null", "[1, 2]", '"x"', "42"])
-    def test_valid_json_non_object_keeps_defaults(self, isolated_state, content):
-        # e.g. `echo null > settings.json` must not crash the app at launch
-        isolated_state.mkdir(parents=True, exist_ok=True)
-        (isolated_state / "settings.json").write_text(content)
-        audio.load_settings()
-        assert audio.settings.volume == 0.7
-        assert audio.settings.muted is False
-
-    @pytest.mark.parametrize("content", ["null", "[1, 2]"])
-    def test_save_replaces_non_object_file(self, isolated_state, content):
-        isolated_state.mkdir(parents=True, exist_ok=True)
-        (isolated_state / "settings.json").write_text(content)
+    @pytest.mark.parametrize("content", ["{not toml", "null"])
+    def test_save_replaces_corrupt_file(self, isolated_state, content):
+        write_config(content)
         audio.settings.toggle_mute()
-        data = json.loads((isolated_state / "settings.json").read_text())
-        assert data == {"muted": True}
+        assert user_settings.load_data() == {"muted": True}
 
     def test_loaded_volume_is_clamped(self, isolated_state):
-        isolated_state.mkdir(parents=True, exist_ok=True)
-        (isolated_state / "settings.json").write_text(json.dumps({"volume": 4.2, "muted": False}))
+        write_config("volume = 4.2\nmuted = false\n")
         audio.load_settings()
         assert audio.settings.volume == 1.0
 
@@ -429,7 +426,7 @@ class TestCliFlags:
         assert audio.settings.volume == 0.45
         assert audio.settings.muted is True
         # flags must NOT persist: the file still holds the saved 0.9
-        data = json.loads((isolated_state / "settings.json").read_text())
+        data = user_settings.load_data()
         assert data["volume"] == 0.9
         assert data["muted"] is False
 

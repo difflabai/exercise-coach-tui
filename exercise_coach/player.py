@@ -23,6 +23,7 @@ from .audio import play_sound, sound_group_complete, sound_set_complete
 from .buddy import celebrate
 from .cassette import all_groups, count_sets, rounds_completed
 from .events import Event
+from .history import append_record, build_record, last_session_for_title
 from .jumpmenu import JumpTarget
 from .models import Cassette, Group
 from .screens import (
@@ -565,13 +566,26 @@ def play_cassette(
     now: Callable[[], float] = time.time,
     read_key: Callable[[], str] | None = None,
     sleep: Callable[[float], None] = time.sleep,
+    prior_elapsed: float = 0.0,
 ) -> None:
-    """Play a cassette from start to finish (or from resume position)."""
+    """Play a cassette from start to finish (or from resume position).
+
+    `prior_elapsed` is active seconds already spent on this session before
+    this invocation — cli.main passes it when re-entering after a Ctrl-Z
+    suspend, and from the saved state's session_elapsed on a Ctrl-C resume —
+    so the history record's duration covers the whole session, not just the
+    final segment."""
     console = Console()
+    # Session wall clock, on the player's (injectable) clock, backdated by
+    # the time already worked before this (re-)invocation.
+    start = now() - prior_elapsed
 
     # Check if already complete
     total, done = count_sets(cassette)
     if total > 0 and done >= total:
+        # No history record here: no workout happened in this run (the run
+        # that produced the progress already appended its own record), and a
+        # 0-duration full record would poison the next session's comparison.
         console.print("[green]All exercises already complete![/green]")
         print_log(cassette)
         save_log(cassette)
@@ -582,20 +596,39 @@ def play_cassette(
 
     speak(cassette.voice_session_intro)
 
-    with Live(console=console, refresh_per_second=4, screen=True) as live:
-        for ctx in cassette.context_exercises:
-            speak(ctx.voice)
-            context_screen(
-                live, cassette, ctx.name, ctx.note, player.avg_rep_set(),
-                now=now, read_key=read_key, sleep=sleep,
-            )
+    try:
+        with Live(console=console, refresh_per_second=4, screen=True) as live:
+            for ctx in cassette.context_exercises:
+                speak(ctx.voice)
+                context_screen(
+                    live, cassette, ctx.name, ctx.note, player.avg_rep_set(),
+                    now=now, read_key=read_key, sleep=sleep,
+                )
 
-        player.run(live)
+            player.run(live)
+    except KeyboardInterrupt:
+        # The prose log entry is written by the CLI's Ctrl-C handler; the
+        # structured history record needs the player's clock and paces, so
+        # it is appended here on the way out. partial=True: an aborted
+        # session must never become last_session_for_title's comparison
+        # baseline (and a later resumed completion appends the real record).
+        append_record(build_record(
+            cassette, now() - start, player.session_paces(), partial=True,
+        ))
+        raise
+
+    duration = now() - start
+    record = build_record(cassette, duration, player.session_paces())
+    # Look up the previous session BEFORE appending this one.
+    previous = last_session_for_title(record["title"])
 
     speak(cassette.voice_session_complete)
     console.print("[bold green]Workout complete![/bold green]\n")
     print_log(cassette)
     save_log(cassette)
+    append_record(record)
+    console.print(ui.build_summary_table(record, previous))
+    console.print()
     _persist_paces(player)
     clear_state()
 
@@ -624,6 +657,7 @@ def play_only_group(
       partial log entry is still written.
     """
     console = Console()
+    start = now()
     player = Player(
         cassette, None, now=now, read_key=read_key, sleep=sleep,
         persist_state=False,
@@ -640,4 +674,8 @@ def play_only_group(
         console.print("\n[yellow]Stopped.[/yellow]")
     print("\n" + render_partial_log(cassette, phase_idx, group_idx) + "\n")
     save_partial_log(cassette, phase_idx, group_idx, label)
+    append_record(build_record(
+        cassette, now() - start, player.session_paces(),
+        partial=True, matched_name=label, group_pos=(phase_idx, group_idx),
+    ))
     _persist_paces(player)

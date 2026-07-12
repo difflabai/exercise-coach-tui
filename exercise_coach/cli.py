@@ -10,6 +10,7 @@ from pathlib import Path
 from rich.console import Console
 
 from . import settings as user_settings
+from . import tts
 from .audio import load_settings
 from .audio import settings as audio_settings
 from .cassette import (
@@ -31,6 +32,7 @@ from .state import (
     render_log,
     save_log,
     save_state,
+    saved_session_elapsed,
 )
 from .term import WorkoutPaused, restore_terminal
 from .tts import terminate_say
@@ -128,6 +130,11 @@ def main() -> None:
     )
     parser.set_defaults(buddy=None)
     parser.add_argument(
+        "--quiet", action="store_true",
+        help="Day mode: --mute --no-buddy in one flag, for this run only. Unlike "
+             "--no-buddy, nothing is persisted.",
+    )
+    parser.add_argument(
         "--only", metavar="NAME|N", default=None,
         help="Play a single group and exit: case-insensitive exercise-name substring, or "
              "1-based jump-menu row number. Logs a partial session; never touches (or "
@@ -139,21 +146,33 @@ def main() -> None:
     args = parser.parse_args()
 
     migrate_legacy_files()
+    user_settings.migrate_legacy_settings()  # settings.json -> config.toml, once
 
     # Volume: persisted setting first, CLI flags override (for this run only —
     # they are not persisted; runtime key changes are).
     load_settings()
     user_settings.load_buddy_enabled()
     user_settings.load_paces()  # learned per-exercise pace, for ETAs
+    voice = user_settings.preferred_voice()
+    if voice:
+        tts.PIPER_PREFERRED_VOICE = voice
     if args.volume is not None:
         audio_settings.set_volume(args.volume / 100)
     if args.mute:
         audio_settings.muted = True
     if args.buddy is not None:
         user_settings.set_buddy_enabled(args.buddy)  # persists (no runtime buddy key)
+    if args.quiet:
+        # Day mode: mute + hide the buddy for THIS run only. Unlike --no-buddy
+        # (which persists by design), nothing is written to config.toml — both
+        # changes are in-memory, applied last so --quiet wins for the run.
+        audio_settings.muted = True
+        user_settings.buddy_enabled = False
 
-    # args.rest is None unless --rest was passed; text input falls back to 75.
-    rest = args.rest if args.rest is not None else 75
+    # args.rest is None unless --rest was passed; when neither the flag nor a
+    # JSON cassette provides a rest, the persisted rest_default (75 unless
+    # config.toml says otherwise) applies — text input always uses it.
+    rest = args.rest if args.rest is not None else user_settings.rest_default()
 
     if args.reset:
         clear_state()
@@ -208,6 +227,10 @@ def main() -> None:
         return
 
     cassette_path = None
+    # Active seconds already worked this session (from a resumed state's
+    # session_elapsed, then accumulated across Ctrl-Z pauses below) — fed
+    # into play_cassette so the history record covers the whole session.
+    prior_elapsed = 0.0
 
     if args.resume:
         state = load_state_data()
@@ -235,6 +258,8 @@ def main() -> None:
         # one cassette's progress onto another or re-logging forever.
         if try_resume(cassette, cassette_path, auto=True) is None:
             print("Nothing to resume; starting fresh.", file=sys.stderr)
+        else:
+            prior_elapsed = saved_session_elapsed(state)
     else:
         resumed_from_state = False
         # If no file given, check saved state to offer resume
@@ -256,6 +281,7 @@ def main() -> None:
                         cassette = tmp_cassette
                         cassette_path = tmp_path
                         resumed_from_state = True
+                        prior_elapsed = saved_session_elapsed(state)
 
         if not resumed_from_state:
             text = read_input(args.file)
@@ -276,8 +302,11 @@ def main() -> None:
                     for group in phase.groups:
                         group.rest = rest
 
-            # Try resume (when file was explicitly provided)
-            try_resume(cassette, cassette_path)
+            # Try resume (when file was explicitly provided). Read the state
+            # before try_resume — a declined prompt clears the file.
+            state_before = load_state_data()
+            if try_resume(cassette, cassette_path) is not None:
+                prior_elapsed = saved_session_elapsed(state_before)
 
     def _save_current_position():
         pos = {"phase_idx": 0, "group_idx": 0, "round_idx": 0}
@@ -287,13 +316,18 @@ def main() -> None:
                 if rc < group.rounds and not group.skipped:
                     pos = {"phase_idx": pi, "group_idx": gi, "round_idx": rc}
                     break
-        save_state(cassette, pos, cassette_path)
+        # prior_elapsed already includes the just-interrupted segment (both
+        # handlers below add it before saving), so a later resume can carry
+        # the whole session's active time into its history record.
+        save_state(cassette, pos, cassette_path, session_elapsed=prior_elapsed)
 
+    segment_start = time.time()
     while True:
         try:
-            play_cassette(cassette, cassette_path)
+            play_cassette(cassette, cassette_path, prior_elapsed=prior_elapsed)
             break
         except WorkoutPaused:
+            prior_elapsed += time.time() - segment_start
             restore_terminal()
             _save_current_position()
             terminate_say()
@@ -303,8 +337,12 @@ def main() -> None:
             os.kill(os.getpid(), signal.SIGTSTP)
             # --- execution resumes here after fg ---
             print("Resuming workout...\n")
+            # Suspended time is not workout time: re-clock the segment so
+            # only active seconds accumulate into prior_elapsed.
+            segment_start = time.time()
             continue
         except KeyboardInterrupt:
+            prior_elapsed += time.time() - segment_start
             restore_terminal()
             _save_current_position()
             terminate_say()
