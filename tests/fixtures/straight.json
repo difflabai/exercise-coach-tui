@@ -1,0 +1,65 @@
+{
+  "version": "1.1",
+  "meta": {
+    "date": "2026-07-12",
+    "title": "Straight Sets Day",
+    "program": "Test Program",
+    "rest_default": 75
+  },
+  "voice": {
+    "session_intro": "Welcome back. Straight sets today.",
+    "session_complete": "That's the whole session. Nice work."
+  },
+  "context_exercises": [
+    {
+      "name": "Dead Hangs",
+      "note": "Accumulate 2 minutes throughout the day.",
+      "voice": "Don't forget your dead hangs today."
+    }
+  ],
+  "phases": [
+    {
+      "type": "warmup",
+      "voice_intro": "Warmup first.",
+      "groups": [
+        {
+          "type": "straight",
+          "rounds": 2,
+          "rest": 30,
+          "exercises": [
+            { "name": "Jumping Jacks", "reps": 20 }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "main",
+      "voice_intro": "Main work. Two movements.",
+      "groups": [
+        {
+          "type": "straight",
+          "rounds": 3,
+          "rest": 90,
+          "setup": "Grab the 24 kilo kettlebell.",
+          "voice_intro": "Goblet squats. Three sets of ten.",
+          "voice_round_complete": ["One down.", "Two down, one to go."],
+          "voice_group_complete": "Squats done.",
+          "exercises": [
+            {
+              "name": "Goblet Squat",
+              "load": "24kg",
+              "sets": [{ "reps": 10 }, { "reps": 10 }, { "reps": 8 }]
+            }
+          ]
+        },
+        {
+          "type": "straight",
+          "rounds": 3,
+          "exercises": [
+            { "name": "Push-up", "reps": 15 }
+          ]
+        }
+      ]
+    }
+  ]
+}
