@@ -169,7 +169,8 @@ class ScriptedKeys:
     by max_reads instead of looping forever.
 
     Key names as run_screen expects them: "enter", "s", "b", "f", "p", "r",
-    digits "0"-"9", "\\x7f" (backspace), "ctrl-z".
+    "j", "q", digits "0"-"9", "\\x7f" (backspace), "ctrl-z", plus the named
+    special keys term.read_key produces: "up", "down", "left", "right", "esc".
     """
 
     def __init__(self, keys=(), max_reads: int = 100_000) -> None:

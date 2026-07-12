@@ -174,16 +174,40 @@ def print_log(cassette: Cassette) -> None:
     print("\n" + render_log(cassette) + "\n")
 
 
-def save_log(cassette: Cassette) -> None:
-    """Append a timestamped workout log entry to the log file."""
+def _log_header(cassette: Cassette, marker: str = "") -> str:
     from datetime import datetime
     title = cassette.meta.get("title", "Workout")
     program = cassette.meta.get("program", "")
     header = f"--- {title}"
     if program:
         header += f" ({program})"
+    if marker:
+        header += f" {marker}"
     header += f" | {datetime.now().strftime('%Y-%m-%d %H:%M')} ---"
-    entry = header + "\n" + render_log(cassette) + "\n\n"
+    return header
+
+
+def _append_log(entry: str) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     with open(LOG_FILE, "a") as f:
         f.write(entry)
+
+
+def save_log(cassette: Cassette) -> None:
+    """Append a timestamped workout log entry to the log file."""
+    _append_log(_log_header(cassette) + "\n" + render_log(cassette) + "\n\n")
+
+
+def render_partial_log(cassette: Cassette, phase_idx: int, group_idx: int) -> str:
+    """Log body for a single group (an --only run): only its exercises."""
+    group = cassette.phases[phase_idx].groups[group_idx]
+    return "\n".join(format_exercise_log(ex, group) for ex in group.exercises)
+
+
+def save_partial_log(cassette: Cassette, phase_idx: int, group_idx: int, matched_name: str) -> None:
+    """Append a partial-session log entry: one group, header marked
+    "(partial: <matched name>)"."""
+    _append_log(
+        _log_header(cassette, marker=f"(partial: {matched_name})")
+        + "\n" + render_partial_log(cassette, phase_idx, group_idx) + "\n\n"
+    )

@@ -168,11 +168,11 @@ def build_rest_panel(rest_seconds: int, remaining: float, overtime: bool) -> Pan
     """Panel shown during rest periods."""
     if overtime:
         ot_secs = int(-remaining)
-        timer_text = f"OVERTIME +{ot_secs}s  (Enter to continue • b = back • p = pause • m/-/+ vol)"
+        timer_text = f"OVERTIME +{ot_secs}s  (Enter to continue • b = back • j = jump • p = pause • m/-/+ vol)"
         timer_style = "bold red"
     else:
         secs_left = int(remaining) + 1
-        timer_text = f"{secs_left}s remaining  (Enter to skip • b = back • p = pause • m/-/+ vol)"
+        timer_text = f"{secs_left}s remaining  (Enter to skip • b = back • j = jump • p = pause • m/-/+ vol)"
         timer_style = "bold yellow"
     content = f"Resting...\n\n[{timer_style}]{timer_text}[/{timer_style}]"
     return Panel(content, title="Rest", border_style="yellow", expand=True)
