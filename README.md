@@ -56,7 +56,7 @@ Plank 3x40s | BW
 
 One master volume (default 70%) covers both the chimes and the voice, with a hard mute on top:
 
-- **Keys, on every screen:** `-` / `+` (or `=`) step the volume by 10%, `m` toggles mute. The current level shows at the right of the progress bar (`🔊 70%`, or `🔇` when muted).
+- **Keys, on every screen:** `-` / `+` (or `=`) step the volume by 10%, `m` toggles mute — a hard mute that also cuts off any speech or chime already playing. The current level shows at the right of the progress bar (`🔊 70%`, or `🔇` when muted).
 - **Flags:** `--volume N` (0-100) and `--mute` set the level for one run without touching the saved setting.
 - **Persistence:** key changes are saved to `settings.json` in the data dir (see below), so your level sticks between sessions.
 

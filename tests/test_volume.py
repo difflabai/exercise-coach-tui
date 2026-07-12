@@ -10,7 +10,8 @@ import io
 import json
 import math
 import struct
-import time
+import subprocess as real_subprocess
+import sys
 import types
 import wave
 
@@ -196,8 +197,10 @@ def which(monkeypatch):
 
 
 class TestTTSVolumeMapping:
-    @pytest.mark.parametrize("volume,amp", [(1.0, "200"), (0.7, "140"), (0.35, "70"), (0.0, "0")])
-    def test_espeak_amplitude_maps_volume_to_0_200(self, which, volume, amp):
+    # Full volume maps to espeak's nominal default amplitude of 100 (the flag
+    # goes to 200, but that clips and is louder than the pre-volume baseline).
+    @pytest.mark.parametrize("volume,amp", [(1.0, "100"), (0.7, "70"), (0.35, "35"), (0.0, "0")])
+    def test_espeak_amplitude_maps_volume_to_0_100(self, which, volume, amp):
         audio.settings.volume = volume
         which("espeak-ng")
         assert tts._tts_fallback_cmd("hi") == ["espeak-ng", "-a", amp, "hi"]
@@ -205,7 +208,7 @@ class TestTTSVolumeMapping:
     def test_plain_espeak_gets_amplitude_too(self, which):
         audio.settings.volume = 0.5
         which("espeak")
-        assert tts._tts_fallback_cmd("hi") == ["espeak", "-a", "100", "hi"]
+        assert tts._tts_fallback_cmd("hi") == ["espeak", "-a", "50", "hi"]
 
     def test_say_gets_inline_volm_markup(self, which):
         audio.settings.volume = 0.7
@@ -219,49 +222,40 @@ class TestTTSVolumeMapping:
         which("say")
         assert tts._tts_fallback_cmd("hi") == ["say", "[[volm 0.00]] hi"]
 
-    def test_pump_scales_raw_s16le_between_piper_and_aplay(self):
+    def test_scaler_process_scales_raw_s16le(self):
+        """The scaler child (`python -c _SCALER_SRC factor`) halves every sample."""
         pcm = make_sine_pcm(amplitude=20000)
+        result = real_subprocess.run(
+            [sys.executable, "-c", tts._SCALER_SRC, "0.5"],
+            input=pcm, stdout=real_subprocess.PIPE, timeout=30,
+        )
+        assert result.returncode == 0
+        assert pcm_samples(result.stdout) == [int(s * 0.5) for s in pcm_samples(pcm)]
 
-        class Sink(io.BytesIO):
-            value = b""
-
-            def close(self):
-                self.value = self.getvalue()
-                super().close()
-
-        dst = Sink()
-        tts._pump_scaled(io.BytesIO(pcm), dst, 0.5)
-        assert dst.closed  # pump closes both ends when the stream is done
-        assert pcm_samples(dst.value) == [int(s * 0.5) for s in pcm_samples(pcm)]
-
-    def test_piper_uses_pump_below_full_volume(self, monkeypatch, which):
-        """Below 1.0 aplay must read from a PIPE (the pump), not piper's stdout."""
+    def test_piper_chain_is_fully_detached_below_full_volume(self, monkeypatch, which):
+        """Below 1.0 the chain is piper -> scaler process -> aplay: three real
+        subprocesses wired stdout-to-stdin, no in-process pump thread, so the
+        final utterance keeps playing after the app exits (the detached-playback
+        NOTE in tts.py) at any volume, not just >= 1.0."""
         audio.settings.volume = 0.5
         which("piper", "aplay")
         monkeypatch.setattr(tts, "_piper_model", lambda: "/fake/model.onnx")
         monkeypatch.setattr(tts, "_piper_sample_rate", lambda _m: 22050)
 
         spawned = []
-        pcm = make_sine_pcm(amplitude=20000)
-
-        class Sink(io.BytesIO):
-            value = b""
-
-            def close(self):
-                self.value = self.getvalue()
-                super().close()
 
         class Proc:
             def __init__(self, cmd, stdin=None, stdout=None, **_kw):
                 self.cmd = cmd
-                # piper "produces" the sine; aplay's stdin captures what it's fed
-                self.stdin = Sink() if stdin == tts.subprocess.PIPE else stdin
-                self.stdout = io.BytesIO(pcm) if stdout == tts.subprocess.PIPE else None
+                self.given_stdin = stdin
+                self.stdin = io.BytesIO() if stdin == real_subprocess.PIPE else stdin
+                self.stdout = (
+                    io.BytesIO() if stdout == real_subprocess.PIPE else stdout
+                )
 
             def poll(self):
                 return None
 
-        import subprocess as real_subprocess
         monkeypatch.setattr(
             tts, "subprocess",
             types.SimpleNamespace(
@@ -272,13 +266,48 @@ class TestTTSVolumeMapping:
         )
 
         procs = tts._start_piper("hello")
+        assert procs is not None and len(procs) == 3
+        piper, scaler, aplay = procs
+        assert piper.cmd[0] == "piper"
+        assert scaler.cmd[:2] == [sys.executable, "-c"]
+        assert scaler.cmd[2] == tts._SCALER_SRC
+        assert float(scaler.cmd[3]) == 0.5
+        assert aplay.cmd[0] == "aplay"
+        # wiring: piper stdout feeds the scaler, scaler stdout feeds aplay
+        assert scaler.given_stdin is piper.stdout
+        assert aplay.given_stdin is scaler.stdout
+
+    def test_piper_pipes_straight_to_aplay_at_full_volume(self, monkeypatch, which):
+        audio.settings.volume = 1.0
+        which("piper", "aplay")
+        monkeypatch.setattr(tts, "_piper_model", lambda: "/fake/model.onnx")
+        monkeypatch.setattr(tts, "_piper_sample_rate", lambda _m: 22050)
+
+        spawned = []
+
+        class Proc:
+            def __init__(self, cmd, stdin=None, stdout=None, **_kw):
+                self.cmd = cmd
+                self.given_stdin = stdin
+                self.stdin = io.BytesIO() if stdin == real_subprocess.PIPE else stdin
+                self.stdout = io.BytesIO() if stdout == real_subprocess.PIPE else stdout
+
+            def poll(self):
+                return None
+
+        monkeypatch.setattr(
+            tts, "subprocess",
+            types.SimpleNamespace(
+                Popen=lambda cmd, **kw: spawned.append(Proc(cmd, **kw)) or spawned[-1],
+                PIPE=real_subprocess.PIPE,
+                DEVNULL=real_subprocess.DEVNULL,
+            ),
+        )
+
+        procs = tts._start_piper("hello")
+        assert procs is not None and len(procs) == 2
         piper, aplay = procs
-        assert piper.cmd[0] == "piper" and aplay.cmd[0] == "aplay"
-        # wait for the daemon pump thread to drain piper -> aplay
-        deadline = time.time() + 5.0
-        while not aplay.stdin.closed and time.time() < deadline:
-            time.sleep(0.01)
-        assert pcm_samples(aplay.stdin.value) == [int(s * 0.5) for s in pcm_samples(pcm)]
+        assert aplay.given_stdin is piper.stdout  # no scaler in between
 
 
 class TestSkipAtZero:
@@ -323,15 +352,32 @@ class TestPersistence:
         audio.save_settings()
         assert (isolated_state / "settings.json").exists()
 
-    def test_step_persists_on_change(self, isolated_state):
+    def test_step_persists_only_the_volume_key(self, isolated_state):
         audio.settings.step_down()
         data = json.loads((isolated_state / "settings.json").read_text())
-        assert data == {"volume": 0.6, "muted": False}
+        assert data == {"volume": 0.6}  # merge-write: untouched keys stay absent
 
     def test_toggle_mute_persists_on_change(self, isolated_state):
         audio.settings.toggle_mute()
         data = json.loads((isolated_state / "settings.json").read_text())
         assert data["muted"] is True
+
+    def test_mute_press_does_not_persist_transient_volume_flag(self, isolated_state):
+        # User has 0.9 persisted, runs with --volume 45 (not persisted), then
+        # presses 'm': only "muted" may be written — the saved 0.9 must survive.
+        audio.settings.volume = 0.9
+        audio.save_settings()
+        audio.settings.set_volume(0.45)  # what the CLI flag does
+        audio.settings.toggle_mute()     # the 'm' key
+        data = json.loads((isolated_state / "settings.json").read_text())
+        assert data == {"volume": 0.9, "muted": True}
+
+    def test_volume_step_does_not_persist_transient_mute_flag(self, isolated_state):
+        audio.save_settings()  # persisted: 0.7, unmuted
+        audio.settings.muted = True  # what --mute does
+        audio.settings.step_down()   # the '-' key
+        data = json.loads((isolated_state / "settings.json").read_text())
+        assert data == {"volume": 0.6, "muted": False}
 
     def test_missing_file_keeps_defaults(self, isolated_state):
         audio.load_settings()
@@ -344,6 +390,23 @@ class TestPersistence:
         audio.load_settings()
         assert audio.settings.volume == 0.7
         assert audio.settings.muted is False
+
+    @pytest.mark.parametrize("content", ["null", "[1, 2]", '"x"', "42"])
+    def test_valid_json_non_object_keeps_defaults(self, isolated_state, content):
+        # e.g. `echo null > settings.json` must not crash the app at launch
+        isolated_state.mkdir(parents=True, exist_ok=True)
+        (isolated_state / "settings.json").write_text(content)
+        audio.load_settings()
+        assert audio.settings.volume == 0.7
+        assert audio.settings.muted is False
+
+    @pytest.mark.parametrize("content", ["null", "[1, 2]"])
+    def test_save_replaces_non_object_file(self, isolated_state, content):
+        isolated_state.mkdir(parents=True, exist_ok=True)
+        (isolated_state / "settings.json").write_text(content)
+        audio.settings.toggle_mute()
+        data = json.loads((isolated_state / "settings.json").read_text())
+        assert data == {"muted": True}
 
     def test_loaded_volume_is_clamped(self, isolated_state):
         isolated_state.mkdir(parents=True, exist_ok=True)
@@ -412,6 +475,35 @@ class TestRunScreenVolumeKeys:
         run_keys(["m", "m", "enter"])
         assert audio.settings.muted is False
 
+    def test_hard_mute_stops_inflight_speech_and_chimes(self, monkeypatch):
+        calls: list[str] = []
+        monkeypatch.setattr(screens, "terminate_say", lambda: calls.append("say"))
+        monkeypatch.setattr(screens, "stop_sounds", lambda: calls.append("sounds"))
+        run_keys(["m", "enter"])
+        assert audio.settings.muted is True
+        assert calls == ["say", "sounds"]  # muting silences what's playing NOW
+
+    def test_unmute_does_not_touch_inflight_audio(self, monkeypatch):
+        calls: list[str] = []
+        monkeypatch.setattr(screens, "terminate_say", lambda: calls.append("say"))
+        monkeypatch.setattr(screens, "stop_sounds", lambda: calls.append("sounds"))
+        audio.settings.muted = True
+        run_keys(["m", "enter"])
+        assert audio.settings.muted is False
+        assert calls == []
+
+    def test_stop_sounds_terminates_live_players_only(self, monkeypatch):
+        live = types.SimpleNamespace(
+            poll=lambda: None, terminated=[], terminate=lambda: live.terminated.append(True),
+        )
+        done = types.SimpleNamespace(
+            poll=lambda: 0, terminated=[], terminate=lambda: done.terminated.append(True),
+        )
+        monkeypatch.setattr(audio, "_players", [live, done])
+        audio.stop_sounds()
+        assert live.terminated == [True]
+        assert done.terminated == []
+
     def test_screen_specific_mapping_wins_over_global_key(self):
         # A screen that maps 'm' itself must receive it — the global mute
         # handler must not consume screen-specific keys.
@@ -446,3 +538,48 @@ class TestRunScreenVolumeKeys:
         bar = ui.build_progress_bar(cassette)
         assert "🔇" in bar
         assert "🔊" not in bar
+
+
+# ---------------------------------------------------------------------------
+# Timed hold "Get in position" countdown: keys work there too
+# ---------------------------------------------------------------------------
+
+class TestCountdownKeys:
+    """The 3s pre-hold countdown is a real screen, not a blind sleep loop:
+    volume keys (and the hold's own s/b) must not be silently dropped."""
+
+    def _run_timed_hold(self, timed_cassette, keys):
+        from io import StringIO
+
+        from rich.console import Console
+        from rich.live import Live
+
+        cassette = load_cassette_from_dict(
+            timed_cassette(rounds=1, seconds=3, cues=[[]])
+        )
+        group = cassette.phases[0].groups[0]
+        ex = group.exercises[0]
+        clock = {"t": 1_000_000.0}
+        queue = list(keys)
+        live = Live(console=Console(file=StringIO(), force_terminal=True, width=100, height=40))
+        return screens.timed_hold(
+            live, cassette, 0, 0, group, ex, 0, 0,
+            now=lambda: clock["t"],
+            read_key=lambda: queue.pop(0) if queue else "",
+            sleep=lambda s: clock.__setitem__("t", clock["t"] + s),
+        )
+
+    def test_volume_and_mute_keys_apply_during_countdown(self, timed_cassette, no_audio):
+        ev = self._run_timed_hold(timed_cassette, ["-", "m"])
+        assert ev is Event.DONE  # keys never end the countdown; the hold still runs
+        assert audio.settings.volume == 0.6
+        assert audio.settings.muted is True
+
+    def test_skip_during_countdown_skips_the_hold(self, timed_cassette, no_audio):
+        ev = self._run_timed_hold(timed_cassette, ["s"])
+        assert ev is Event.SKIP
+        assert "Go" not in no_audio.spoken  # the hold never started
+
+    def test_back_during_countdown_backs_out(self, timed_cassette, no_audio):
+        ev = self._run_timed_hold(timed_cassette, ["b"])
+        assert ev is Event.BACK

@@ -12,6 +12,7 @@ import io
 import json
 import math
 import subprocess
+import sys
 import types
 import wave
 
@@ -270,8 +271,10 @@ class TestBackendSelection:
     def test_piper_preferred_when_all_backends_exist(self, tts_env):
         spawned = tts_env("piper", "aplay", "say", "espeak-ng", "espeak", piper_rate=16000)
         REAL_START_SAY("hello world")
-        assert [p.cmd[0] for p in spawned] == ["piper", "aplay"]
-        piper, aplay = spawned
+        # Default volume is 0.7 < 1.0, so a detached scaler process sits
+        # between piper and aplay (chain wiring covered in test_volume.py).
+        assert [p.cmd[0] for p in spawned] == ["piper", sys.executable, "aplay"]
+        piper, scaler, aplay = spawned
         assert piper.cmd == ["piper", "--model", piper.cmd[2], "--output_raw"]
         assert piper.cmd[2].endswith("en_US-test.onnx")
         assert piper.stdin.value == b"hello world"  # text fed via stdin
@@ -281,7 +284,7 @@ class TestBackendSelection:
         assert tts._say_procs == spawned
 
     # Fallback commands carry the master volume (default 0.7): `say` gets
-    # inline [[volm]] markup, espeak-ng/espeak get -a 0..200 (0.7 -> 140).
+    # inline [[volm]] markup, espeak-ng/espeak get -a 0..100 (0.7 -> 70).
     # The mapping itself is covered in test_volume.py.
 
     def test_piper_without_aplay_falls_back(self, tts_env):
@@ -292,7 +295,7 @@ class TestBackendSelection:
     def test_piper_without_model_falls_back(self, tts_env):
         spawned = tts_env("piper", "aplay", "espeak-ng")  # binaries yes, model no
         REAL_START_SAY("hi")
-        assert [p.cmd for p in spawned] == [["espeak-ng", "-a", "140", "hi"]]
+        assert [p.cmd for p in spawned] == [["espeak-ng", "-a", "70", "hi"]]
 
     def test_say_only(self, tts_env):
         spawned = tts_env("say")
@@ -303,12 +306,12 @@ class TestBackendSelection:
     def test_espeak_ng_fallback(self, tts_env):
         spawned = tts_env("espeak-ng", "espeak")
         REAL_START_SAY("hi")
-        assert [p.cmd for p in spawned] == [["espeak-ng", "-a", "140", "hi"]]
+        assert [p.cmd for p in spawned] == [["espeak-ng", "-a", "70", "hi"]]
 
     def test_plain_espeak_is_last_resort(self, tts_env):
         spawned = tts_env("espeak")
         REAL_START_SAY("hi")
-        assert [p.cmd for p in spawned] == [["espeak", "-a", "140", "hi"]]
+        assert [p.cmd for p in spawned] == [["espeak", "-a", "70", "hi"]]
 
     def test_no_backend_is_a_silent_noop(self, tts_env):
         spawned = tts_env()  # nothing installed

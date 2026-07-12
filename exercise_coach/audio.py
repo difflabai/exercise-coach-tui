@@ -41,15 +41,15 @@ class AudioSettings:
 
     def step_up(self) -> None:
         self.set_volume(self.volume + self.STEP)
-        save_settings()
+        save_settings("volume")
 
     def step_down(self) -> None:
         self.set_volume(self.volume - self.STEP)
-        save_settings()
+        save_settings("volume")
 
     def toggle_mute(self) -> None:
         self.muted = not self.muted
-        save_settings()
+        save_settings("muted")
 
     def effective(self) -> float:
         """Playback level: 0.0 when muted, else the master volume."""
@@ -72,18 +72,34 @@ def load_settings() -> None:
     """Load persisted volume/mute into `settings`. Missing/corrupt file keeps defaults."""
     try:
         data = json.loads(_settings_file().read_text())
+        if not isinstance(data, dict):  # valid JSON but not an object (null, list…)
+            return
         settings.set_volume(float(data.get("volume", settings.volume)))
         settings.muted = bool(data.get("muted", settings.muted))
     except (OSError, ValueError, TypeError):
         pass
 
 
-def save_settings() -> None:
-    """Persist volume/mute. Best-effort: failure must never interrupt a workout."""
+def save_settings(*keys: str) -> None:
+    """Persist the named keys ("volume"/"muted"; no args = both), merged into
+    whatever is already on disk.
+
+    Merging matters: CLI flags override for one run without being persisted,
+    so a toggle_mute must write only "muted" — writing both would silently
+    replace the saved volume with a transient --volume flag value.
+    Best-effort: failure must never interrupt a workout."""
     try:
         path = _settings_file()
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, ValueError):
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        for key in keys or ("volume", "muted"):
+            data[key] = getattr(settings, key)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"volume": settings.volume, "muted": settings.muted}))
+        path.write_text(json.dumps(data))
     except OSError:
         pass
 
@@ -150,6 +166,17 @@ def _cleanup_sounds() -> None:
                 pass
     if _sound_dir is not None:
         shutil.rmtree(_sound_dir, ignore_errors=True)
+
+
+def stop_sounds() -> None:
+    """Stop any in-flight tone players (hard mute). Finished procs are reaped
+    on the next play_sound / at exit, so just terminate the live ones."""
+    for p in _players:
+        if p.poll() is None:
+            try:
+                p.terminate()
+            except OSError:
+                pass
 
 
 def _sound_path(sound_data: bytes) -> str:
