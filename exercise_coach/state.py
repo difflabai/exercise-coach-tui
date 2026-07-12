@@ -148,9 +148,11 @@ def format_exercise_log(ex: ExerciseData, group: Group) -> str:
     if failures:
         fail_idx, fail_set = failures[0]
         fail_reps = fail_set.actual_reps or 0
+        # Timed holds failed at N *seconds*; the rep variant stays bare.
+        fail_label = f"{fail_reps}s" if ex.timed else str(fail_reps)
         return (
             f"{ex.name:<25} {group.rounds}[{fail_idx}]×{reps_str}"
-            f" - failed at {fail_reps} on set {fail_idx + 1}{load_str}"
+            f" - failed at {fail_label} on set {fail_idx + 1}{load_str}"
         )
 
     if completed_count >= group.rounds:

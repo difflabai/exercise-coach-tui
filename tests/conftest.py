@@ -22,11 +22,22 @@ from pathlib import Path
 # re-points the module constants at the per-test tmp_path.)
 os.environ["XDG_DATA_HOME"] = tempfile.mkdtemp(prefix="exercise-coach-tests-xdg-")
 
+# Color-forcing env vars make Rich emit ANSI into capsys regardless of the
+# fake terminals the tests set up (e.g. `FORCE_COLOR=3 pytest` broke the
+# try_resume output assertions). Neutralize them for the whole test process,
+# before Rich is imported anywhere; the autouse fixture below keeps them out
+# for the duration of every test too (keep this list and _COLOR_ENV_VARS in
+# sync).
+os.environ.pop("FORCE_COLOR", None)
+os.environ.pop("NO_COLOR", None)
+os.environ.pop("CLICOLOR_FORCE", None)
+os.environ.pop("COLORTERM", None)
+
 import pytest
 from rich.console import Console
 from rich.live import Live
 
-from exercise_coach import audio, buddy, screens, state, tts
+from exercise_coach import audio, buddy, screens, state, tts, ui
 from exercise_coach import player as player_mod
 from exercise_coach import settings as user_settings
 from exercise_coach.cassette import load_cassette_from_dict
@@ -34,6 +45,8 @@ from exercise_coach.models import Cassette
 from exercise_coach.player import Player
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
+
+_COLOR_ENV_VARS = ("FORCE_COLOR", "NO_COLOR", "CLICOLOR_FORCE", "COLORTERM")
 
 
 # ---------------------------------------------------------------------------
@@ -59,6 +72,15 @@ def isolated_state(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def neutral_color_env(monkeypatch):
+    """Belt to the import-time braces above: Rich reads these env vars at
+    Console() construction time, so also keep them deleted around every test
+    (a test that sets one deliberately overrides this via its own patching)."""
+    for var in _COLOR_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def reset_audio_settings():
     """The volume/mute singleton is process-global mutable state — reset it to
     defaults around every test so one test's key presses can't leak into the
@@ -72,14 +94,21 @@ def reset_audio_settings():
 
 @pytest.fixture(autouse=True)
 def reset_buddy_state():
-    """buddy.py's celebrate-until timestamp and settings.py's buddy flag are
-    process-global mutable state — reset both around every test (mirrors
-    reset_audio_settings; the player stamps celebrate() on every set)."""
+    """buddy.py's celebrate-until timestamp, settings.py's buddy flag and
+    paces map, and ui.py's pending-rests set are process-global mutable
+    state — reset all of them around every test (mirrors
+    reset_audio_settings; the player stamps celebrate() on every set,
+    update_paces() at session end, and binds its live _pending_rest set
+    into ui.pending_rests at construction)."""
     buddy.reset()
     user_settings.buddy_enabled = True
+    user_settings.paces = {}
+    ui.pending_rests = set()
     yield
     buddy.reset()
     user_settings.buddy_enabled = True
+    user_settings.paces = {}
+    ui.pending_rests = set()
 
 
 class AudioLog:

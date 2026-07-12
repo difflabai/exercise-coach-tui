@@ -82,10 +82,12 @@ def build_set_rows(phase_idx: int, group_idx: int, group: Group) -> list[SetRow]
             if r >= len(ex.sets):
                 continue
             s = ex.sets[r]
+            # A hold's actuals are seconds, not reps (rep rows stay bare).
+            unit = "s" if ex.timed else ""
             if s.failure:
-                status = f"✗ {s.actual_reps or 0} (failed)"
+                status = f"✗ {s.actual_reps or 0}{unit} (failed)"
             elif s.actual_reps is not None:
-                status = f"✓ {s.actual_reps}"
+                status = f"✓ {s.actual_reps}{unit}"
             else:
                 status = ""
             rows.append(SetRow(

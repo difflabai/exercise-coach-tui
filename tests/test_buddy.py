@@ -211,7 +211,7 @@ class TestScreenMoods:
         cassette = load_cassette_from_dict(timed_cassette(rounds=1, seconds=3, cues=[[]]))
         group = cassette.phases[0].groups[0]
         live, clock = make_live(), Clock()
-        ev = screens.timed_hold(
+        ev, _ = screens.timed_hold(
             live, cassette, 0, 0, group, group.exercises[0], 0, 0,
             now=clock.now, read_key=scripted("s"), sleep=clock.sleep,
         )

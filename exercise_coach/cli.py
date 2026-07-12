@@ -144,6 +144,7 @@ def main() -> None:
     # they are not persisted; runtime key changes are).
     load_settings()
     user_settings.load_buddy_enabled()
+    user_settings.load_paces()  # learned per-exercise pace, for ETAs
     if args.volume is not None:
         audio_settings.set_volume(args.volume / 100)
     if args.mute:
