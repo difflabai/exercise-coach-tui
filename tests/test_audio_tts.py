@@ -95,6 +95,16 @@ def wav_params(data: bytes) -> tuple[int, int, int, int]:
         return w.getnchannels(), w.getsampwidth(), w.getframerate(), w.getnframes()
 
 
+def wav_peak(data: bytes) -> int:
+    """Peak absolute sample value of a 16-bit WAV byte string."""
+    with wave.open(io.BytesIO(data), "rb") as w:
+        frames = w.readframes(w.getnframes())
+    return max(
+        abs(int.from_bytes(frames[i:i + 2], "little", signed=True))
+        for i in range(0, len(frames), 2)
+    )
+
+
 # ---------------------------------------------------------------------------
 # audio.py — tone generation
 # ---------------------------------------------------------------------------
@@ -138,11 +148,21 @@ class TestToneGeneration:
         assert (nchannels, sampwidth, framerate) == (1, 2, SAMPLE_RATE)
         assert nframes == SAMPLE_RATE * 300 // 1000
 
+    def test_rest_warning_is_shorter_and_quieter_than_rest_done(self):
+        """The T-5s tick is a soft single blip: a 120ms 660Hz tone generated
+        below full amplitude, unlike every other tone (which is generated at
+        1.0 and only scaled at play time)."""
+        nchannels, sampwidth, framerate, nframes = wav_params(audio.sound_rest_warning())
+        assert (nchannels, sampwidth, framerate) == (1, 2, SAMPLE_RATE)
+        assert nframes == SAMPLE_RATE * 120 // 1000  # shorter than the 300ms ding
+        assert wav_peak(audio.sound_rest_warning()) < wav_peak(audio.sound_rest_done()) * 0.5
+
     def test_tones_are_lazily_cached(self):
         # lru_cache: repeated calls return the identical object, not a rebuild
         assert audio.sound_set_complete() is audio.sound_set_complete()
         assert audio.sound_group_complete() is audio.sound_group_complete()
         assert audio.sound_rest_done() is audio.sound_rest_done()
+        assert audio.sound_rest_warning() is audio.sound_rest_warning()
 
 
 # ---------------------------------------------------------------------------
@@ -371,3 +391,115 @@ class TestCaptionsAndReaping:
         tts.terminate_say()
         assert running.terminated
         assert tts._say_procs == []
+
+
+# ---------------------------------------------------------------------------
+# rest_timer: the T-5s pre-rest-end warning tick (recommendations §7)
+# ---------------------------------------------------------------------------
+
+def run_rest_timer(rest_seconds: int, spins: int, monkeypatch, *, real_sound: bool = False):
+    """Drive screens.rest_timer headlessly for `spins` quarter-second loop
+    iterations (then 'enter' ends it). Returns the list of (marker, elapsed)
+    chimes fired — or, with real_sound=True, leaves screens.play_sound alone
+    and returns nothing (the caller wires its own recorder)."""
+    from conftest import FakeClock, ScriptedKeys
+    from rich.console import Console
+    from rich.live import Live
+
+    from exercise_coach import screens
+    from exercise_coach.cassette import load_cassette_from_dict
+
+    cassette = load_cassette_from_dict({
+        "version": "1.1",
+        "meta": {"date": "2026-07-12", "title": "Tick Test", "rest_default": 75},
+        "phases": [{"type": "main", "groups": [
+            {"type": "straight", "rounds": 2, "rest": rest_seconds,
+             "exercises": [{"name": "Squat", "reps": 10}]},
+        ]}],
+    })
+    clock = FakeClock()
+    start = clock.t
+    fired: list[tuple[bytes, float]] = []
+    if not real_sound:
+        monkeypatch.setattr(
+            screens, "play_sound", lambda data: fired.append((data, clock.t - start)),
+        )
+    keys = ScriptedKeys([""] * spins + ["enter"])
+    live = Live(console=Console(file=io.StringIO(), force_terminal=True, width=100, height=40))
+    screens.rest_timer(
+        live, cassette, 0, 0, rest_seconds,
+        now=clock.now, read_key=keys, sleep=clock.sleep,
+    )
+    return fired
+
+
+class TestRestWarningTick:
+    """The soft tick at T-5s: once per rest_timer invocation, through the
+    volume-gated play_sound, and never for tiny rests."""
+
+    def test_fires_exactly_once_at_t_minus_5(self, monkeypatch, no_audio):
+        # 60s rest, ended at 57.5s elapsed: the first tick with remaining <= 5
+        # runs at elapsed 55.0 exactly (0.25s loop steps), and only that one.
+        fired = run_rest_timer(60, spins=230, monkeypatch=monkeypatch)
+        assert fired == [(b"rest_warning", 55.0)]
+
+    def test_fires_before_the_rest_done_ding_in_overtime(self, monkeypatch, no_audio):
+        # Run a 10s rest into overtime: warning at 5.0, ding just past 10.0.
+        fired = run_rest_timer(10, spins=45, monkeypatch=monkeypatch)
+        assert fired == [(b"rest_warning", 5.0), (b"rest_done", 10.25)]
+
+    def test_skipped_entirely_for_short_rests(self, monkeypatch, no_audio):
+        # A 6s rest spends most of its life with remaining <= 5, but rests
+        # under 8s never blip — the blip and ding would land back-to-back.
+        fired = run_rest_timer(6, spins=20, monkeypatch=monkeypatch)
+        assert fired == []
+
+    def test_8s_rest_is_the_shortest_that_warns(self, monkeypatch, no_audio):
+        fired = run_rest_timer(8, spins=16, monkeypatch=monkeypatch)
+        assert fired == [(b"rest_warning", 3.0)]
+
+    def test_replayed_pending_rest_gets_its_own_warning(self, make_player, no_audio):
+        """'b' during a rest leaves it pending; re-entering the group restarts
+        the rest in full — a fresh rest_timer invocation, so the T-5s tick
+        fires again for the replay."""
+        cass = {
+            "version": "1.1",
+            "meta": {"date": "2026-07-12", "title": "Replay", "rest_default": 75},
+            "phases": [{"type": "main", "groups": [
+                {"type": "straight", "rounds": 2, "rest": 60,
+                 "exercises": [{"name": "Squat", "reps": 10}]},
+            ]}],
+        }
+        keys = (
+            ["enter", "enter"]        # transition + set 1
+            + [""] * 221 + ["b"]      # rest to T-5 (warning), then interrupt it
+            + [""] * 221 + ["enter"]  # the replayed rest, warned again, ended
+            + ["enter"]               # set 2
+        )
+        h = make_player(cass, keys=keys)
+        h.run()
+        assert h.player.is_complete()
+        assert no_audio.sounds.count(b"rest_warning") == 2
+
+    def test_muted_skips_the_warning_tick(self, monkeypatch, no_audio):
+        """End-to-end through the real play_sound: muted means no temp WAV is
+        ever written for the tick (same gate as every other tone)."""
+        wavs: list[bytes] = []
+        proc = types.SimpleNamespace(poll=lambda: 0)
+        monkeypatch.setattr(audio, "_sound_path", lambda data: wavs.append(data) or "/nonexistent.wav")
+        monkeypatch.setattr(
+            audio, "subprocess",
+            types.SimpleNamespace(Popen=lambda *a, **k: proc, DEVNULL=None),
+        )
+        monkeypatch.setattr(audio, "_players", [])
+        from exercise_coach import screens
+        monkeypatch.setattr(screens, "play_sound", REAL_PLAY_SOUND)
+        monkeypatch.setattr(screens, "sound_rest_warning", audio.sound_rest_warning)
+
+        audio.settings.muted = True
+        run_rest_timer(60, spins=230, monkeypatch=monkeypatch, real_sound=True)
+        assert wavs == []
+
+        audio.settings.muted = False
+        run_rest_timer(60, spins=230, monkeypatch=monkeypatch, real_sound=True)
+        assert len(wavs) == 1  # unmuted control: the same run does play it

@@ -7,12 +7,15 @@ every state/log file lands in tmp_path via conftest's autouse fixtures.
 
 import json
 import time
+import types
 
 import pytest
+from conftest import FakeClock
 
 from exercise_coach import cli
 from exercise_coach import state as state_mod
 from exercise_coach.cassette import parse_input
+from exercise_coach.term import WorkoutPaused
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -347,6 +350,132 @@ class TestMainResumeOffer:
         assert group.rounds == 2
         assert group.rest == 75  # text input default
         assert not state_mod.STATE_FILE.exists()  # declining cleared the state
+
+
+# ---------------------------------------------------------------------------
+# main(): the session wall clock survives pause/resume
+# ---------------------------------------------------------------------------
+
+
+class TestSessionElapsedCarryover:
+    """A paused/resumed session's history duration must cover the whole
+    workout: main() feeds prior active seconds into play_cassette (and the
+    state file) instead of letting each (re-)invocation re-clock from zero."""
+
+    @pytest.fixture
+    def recorded_plays(self, monkeypatch):
+        """Like `played`, but records the prior_elapsed keyword."""
+        seen = []
+
+        def _record(cassette, cassette_path=None, *, prior_elapsed=0.0, **_kw):
+            seen.append(prior_elapsed)
+
+        monkeypatch.setattr(cli, "play_cassette", _record)
+        return seen
+
+    def test_fresh_run_passes_zero_prior_elapsed(
+        self, recorded_plays, straight_cassette, tmp_path, monkeypatch
+    ):
+        forbid_input(monkeypatch)
+        path = write_cassette(tmp_path, straight_cassette())
+        run_main(monkeypatch, str(path))
+        assert recorded_plays == [0.0]
+
+    def test_resume_feeds_saved_session_elapsed_into_play_cassette(
+        self, recorded_plays, straight_cassette, tmp_path, monkeypatch, capsys
+    ):
+        forbid_input(monkeypatch)
+        raw = straight_cassette()
+        path = write_cassette(tmp_path, raw)
+        c = cassette_from(raw)
+        c.phases[0].groups[0].exercises[0].sets[0].actual_reps = 10
+        state_mod.save_state(
+            c, {"phase_idx": 0, "group_idx": 0, "round_idx": 1}, str(path),
+            session_elapsed=345.6,
+        )
+
+        run_main(monkeypatch, "--resume")
+
+        assert recorded_plays == [345.6]
+
+    def test_offered_resume_accepted_feeds_saved_elapsed(
+        self, recorded_plays, straight_cassette, tmp_path, monkeypatch, capsys
+    ):
+        raw = straight_cassette()
+        path = write_cassette(tmp_path, raw)
+        c = cassette_from(raw)
+        c.phases[0].groups[0].exercises[0].sets[0].actual_reps = 10
+        state_mod.save_state(
+            c, {"phase_idx": 0, "group_idx": 0, "round_idx": 1}, str(path),
+            session_elapsed=61.5,
+        )
+        monkeypatch.setattr("builtins.input", lambda: "y")
+
+        run_main(monkeypatch)  # no file arg: the interactive resume offer
+
+        assert recorded_plays == [61.5]
+
+    def test_file_arg_resume_accepted_feeds_saved_elapsed(
+        self, recorded_plays, straight_cassette, tmp_path, monkeypatch, capsys
+    ):
+        raw = straight_cassette()
+        path = write_cassette(tmp_path, raw)
+        c = cassette_from(raw)
+        c.phases[0].groups[0].exercises[0].sets[0].actual_reps = 10
+        state_mod.save_state(
+            c, {"phase_idx": 0, "group_idx": 0, "round_idx": 1}, str(path),
+            session_elapsed=42.0,
+        )
+        monkeypatch.setattr("builtins.input", lambda: "y")
+
+        run_main(monkeypatch, str(path))  # explicit file + accepted prompt
+
+        assert recorded_plays == [42.0]
+
+    def test_ctrl_z_pause_accumulates_active_time_across_reentry(
+        self, straight_cassette, tmp_path, monkeypatch, capsys
+    ):
+        """The pause loop: 60s of work, Ctrl-Z (suspended 300s), fg, finish.
+        The re-invocation must get the pre-pause 60s — and only the 60s of
+        *active* time, not the suspension — and the state file saved at the
+        pause must carry it too."""
+        forbid_input(monkeypatch)
+        path = write_cassette(tmp_path, straight_cassette())
+        clock = FakeClock()
+        monkeypatch.setattr(cli, "time", types.SimpleNamespace(time=clock.now))
+        # Suspension must not actually stop the test process; model it as
+        # 300s of wall time passing while suspended.
+        monkeypatch.setattr(
+            cli, "os",
+            types.SimpleNamespace(kill=lambda *_a: clock.sleep(300), getpid=lambda: 0),
+        )
+        monkeypatch.setattr(
+            cli, "signal",
+            types.SimpleNamespace(signal=lambda *_a: None, SIGTSTP=0, SIG_DFL=0),
+        )
+
+        seen = []
+        saved_at_pause = []
+
+        def _fake_play(cassette, cassette_path=None, *, prior_elapsed=0.0, **_kw):
+            seen.append(prior_elapsed)
+            if len(seen) == 1:
+                clock.sleep(60)  # 60s of active work, then Ctrl-Z
+                raise WorkoutPaused()
+
+        monkeypatch.setattr(cli, "play_cassette", _fake_play)
+        real_save_state = state_mod.save_state
+
+        def _spy_save_state(*args, **kwargs):
+            saved_at_pause.append(kwargs.get("session_elapsed", 0.0))
+            real_save_state(*args, **kwargs)
+
+        monkeypatch.setattr(cli, "save_state", _spy_save_state)
+
+        run_main(monkeypatch, str(path))
+
+        assert seen == [0.0, 60.0]
+        assert saved_at_pause == [60.0]
 
 
 # ---------------------------------------------------------------------------

@@ -19,7 +19,7 @@ from rich.live import Live
 from rich.panel import Panel
 from rich.text import Text
 
-from .audio import play_sound, sound_rest_done, stop_sounds
+from .audio import play_sound, sound_rest_done, sound_rest_warning, stop_sounds
 from .audio import settings as audio_settings
 from .buddy import Mood
 from .events import Event
@@ -49,6 +49,12 @@ OVERTIME_NAGS = [
     "Clock's done, you're not.",
     "Let's move.",
 ]
+
+# Soft warning tick this many seconds before the rest ends...
+REST_WARNING_AT = 5
+# ...but not for tiny rests, where the blip and the rest-done ding would
+# land back-to-back.
+REST_WARNING_MIN = 8
 
 
 def get_cues_for_round(group: Group, round_idx: int) -> list[TimedCue]:
@@ -358,7 +364,7 @@ def rest_timer(
     sleep: Callable[[float], None] = time.sleep,
 ) -> Event:
     """Countdown rest timer. Returns DONE, SKIP, or BACK."""
-    state = {"start": now(), "nags": 0, "dinged": False}
+    state = {"start": now(), "nags": 0, "dinged": False, "warned": False}
 
     def tick() -> Event | None:
         remaining = rest_seconds - (now() - state["start"])
@@ -370,6 +376,16 @@ def rest_timer(
             if overtime_secs >= 15 and overtime_secs // 15 > state["nags"]:
                 state["nags"] = overtime_secs // 15
                 say(OVERTIME_NAGS[state["nags"] % len(OVERTIME_NAGS)])
+        elif (
+            not state["warned"]
+            and rest_seconds >= REST_WARNING_MIN
+            and remaining <= REST_WARNING_AT
+        ):
+            # T-5s warning tick, once per rest_timer invocation (a pending
+            # rest replayed after 'b'/'j' is a fresh invocation and gets its
+            # own). play_sound already gates on the master volume/mute.
+            state["warned"] = True
+            play_sound(sound_rest_warning())
         return None
 
     def render() -> None:

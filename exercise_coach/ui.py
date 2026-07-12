@@ -12,6 +12,7 @@ from . import settings as user_settings
 from .audio import settings as audio_settings
 from .buddy import COLLAPSE_WIDTH, Mood, buddy_panel, celebrating
 from .cassette import count_sets, rounds_completed
+from .history import record_duration, record_set_counts
 from .models import Cassette, ExerciseData, Group
 from .tts import CAPTION_DURATION, current_caption
 
@@ -243,6 +244,60 @@ def estimate_remaining(
             if pending_rests and (pi, gi) in pending_rests and 0 < rc < group.rounds:
                 remaining += group.rest
     return remaining
+
+
+def format_duration(seconds: int) -> str:
+    """"23m 41s" / "41s" — like format_eta but without the 'done' floor."""
+    minutes, secs = divmod(max(0, int(seconds)), 60)
+    if minutes > 0:
+        return f"{minutes}m {secs:02d}s"
+    return f"{secs}s"
+
+
+def _signed_duration(delta: int) -> str:
+    return ("+" if delta >= 0 else "-") + format_duration(abs(delta))
+
+
+def build_summary_table(record: dict, previous: dict | None) -> Table:
+    """End-of-session summary table (recommendations §7).
+
+    Pure: takes the session's just-built history record plus the previous
+    record with the same title (None when this title has no history), and
+    returns the Table — so play_cassette just prints it and tests snapshot
+    it. With no previous session the comparison column is omitted entirely;
+    with one, the deltas cover total time and sets done."""
+    done, skipped, failed = record_set_counts(record)
+    duration = record_duration(record)
+
+    table = Table(
+        title=f"Session summary — {record.get('title', 'Workout')}",
+        box=box.SIMPLE_HEAVY, pad_edge=False,
+    )
+    table.add_column("", style="bold")
+    table.add_column("This session", justify="right")
+
+    deltas: dict[str, str] = {}
+    if previous is not None:
+        prev_date = str(previous.get("timestamp", ""))[:10]
+        table.add_column(f"vs last ({prev_date})" if prev_date else "vs last", justify="right")
+        prev_done, _, _ = record_set_counts(previous)
+        deltas = {
+            "Total time": _signed_duration(duration - record_duration(previous)),
+            "Sets done": f"{done - prev_done:+d}",
+        }
+
+    rows = [
+        ("Total time", format_duration(duration)),
+        ("Sets done", str(done)),
+        ("Sets skipped", str(skipped)),
+        ("Sets failed", str(failed)),
+    ]
+    for label, value in rows:
+        if previous is None:
+            table.add_row(label, value)
+        else:
+            table.add_row(label, value, deltas.get(label, ""))
+    return table
 
 
 def volume_label() -> str:
