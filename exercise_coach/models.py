@@ -16,6 +16,8 @@ class ExerciseData:
     load: str
     timed: bool
     sets: list[SetData] = field(default_factory=list)
+    tempo: str | None = None  # v1.2: display-only, e.g. "3s eccentric"
+    per_side: bool = False  # v1.2: display rep target as "N/side"
 
 
 @dataclass

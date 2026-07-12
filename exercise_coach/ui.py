@@ -11,6 +11,32 @@ from .models import Cassette, ExerciseData, Group
 from .tts import CAPTION_DURATION, current_caption
 
 
+def format_rep_target(
+    ex: ExerciseData, reps: int, *,
+    timed_suffix: str = "", reps_suffix: str = "",
+) -> str:
+    """Display label for a set's rep target, with the v1.2 transforms.
+
+    Base is "12" (reps) or "30s" (timed), plus the caller's context suffix
+    (" reps" / " hold"). `per_side` turns the base into "12/side" / "30s/side"
+    (the suffix is dropped — "/side" already reads as a complete target).
+    `tempo` is appended after " · ". Display-only: log output never uses this.
+    """
+    if ex.timed:
+        label = f"{reps}s"
+        suffix = timed_suffix
+    else:
+        label = str(reps)
+        suffix = reps_suffix
+    if ex.per_side:
+        label += "/side"
+    elif suffix:
+        label += suffix
+    if ex.tempo:
+        label += f" · {ex.tempo}"
+    return label
+
+
 def build_overview(cassette: Cassette, cur_phase: int, cur_group: int) -> Table:
     """Build the overview table showing all phases, groups, and exercises."""
     title = cassette.meta.get("title", "Workout")
@@ -34,7 +60,7 @@ def build_overview(cassette: Cassette, cur_phase: int, cur_group: int) -> Table:
             rc = rounds_completed(group)
 
             for ei, ex in enumerate(group.exercises):
-                reps_str = f"{ex.sets[0].reps}s" if ex.timed else str(ex.sets[0].reps)
+                reps_str = format_rep_target(ex, ex.sets[0].reps)
                 load_str = f" | {ex.load}" if ex.load else ""
 
                 if group.skipped:
@@ -84,7 +110,9 @@ def build_active_panel_straight(
 ) -> Panel:
     """Active panel for straight sets (single exercise group)."""
     lines: list[str] = []
-    reps_label = f"{ex.sets[round_idx].reps}s hold" if ex.timed else f"{ex.sets[round_idx].reps} reps"
+    reps_label = format_rep_target(
+        ex, ex.sets[round_idx].reps, timed_suffix=" hold", reps_suffix=" reps",
+    )
     lines.append(f"[bold]{ex.name}[/bold]")
     if ex.load:
         lines.append(f"Weight: {ex.load}")
@@ -103,7 +131,7 @@ def build_active_panel_superset(
     """Active panel for supersets/circuits showing all exercises with markers."""
     lines: list[str] = []
     for ei, ex in enumerate(group.exercises):
-        reps_label = f"{ex.sets[round_idx].reps}s" if ex.timed else f"{ex.sets[round_idx].reps} reps"
+        reps_label = format_rep_target(ex, ex.sets[round_idx].reps, reps_suffix=" reps")
         load_str = f"  •  {ex.load}" if ex.load else ""
         if ei < active_ex_idx:
             marker = "✓"

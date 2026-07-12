@@ -1,0 +1,70 @@
+{
+  "version": "1.2",
+  "meta": {
+    "date": "2026-03-21",
+    "title": "Full Body B — Week 6",
+    "program": "Building",
+    "session_number": 18,
+    "rest_default": 120
+  },
+  "phases": [
+    {
+      "type": "main",
+      "voice_intro": "Main work. Bench and rows superset, then RDLs.",
+      "groups": [
+        {
+          "type": "superset",
+          "rounds": 4,
+          "rest": 105,
+          "exercises": [
+            {
+              "name": "DB Bench Press",
+              "load": "55 lbs",
+              "timed": false,
+              "sets": [{ "reps": 10 }, { "reps": 10 }, { "reps": 10 }, { "reps": 10 }]
+            },
+            {
+              "name": "One-Arm DB Rows",
+              "load": "55 lbs",
+              "timed": false,
+              "per_side": true,
+              "sets": [{ "reps": 10 }, { "reps": 10 }, { "reps": 10 }, { "reps": 10 }]
+            }
+          ],
+          "voice_intro": "Superset: bench and rows, four rounds.",
+          "voice_round_complete": [
+            "Round one. Push and pull, smooth.",
+            "Two. No issues.",
+            "Three. That's the round that got you last week. Not today.",
+            "All four clean. PR on volume at this weight."
+          ],
+          "voice_group_complete": "Bench and rows done. Solid supersets."
+        },
+        {
+          "type": "straight",
+          "rounds": 4,
+          "rest": 105,
+          "exercises": [{
+            "name": "DB RDLs",
+            "load": "55 lbs",
+            "timed": false,
+            "tempo": "3s eccentric",
+            "sets": [{ "reps": 13 }, { "reps": 13 }, { "reps": 13 }, { "reps": 13 }]
+          }],
+          "voice_intro": "Romanian deadlifts, 55s. Thirteen reps, slow on the way down.",
+          "voice_round_complete": [
+            "Good hinge.",
+            "Two. Hamstrings waking up.",
+            "Three. Keep the back flat.",
+            "All four at thirteen. Solid work."
+          ],
+          "voice_group_complete": "RDLs done."
+        }
+      ]
+    }
+  ],
+  "voice": {
+    "session_intro": "Full Body B, week 6. Bench-row superset, then RDLs.",
+    "session_complete": "That's a wrap."
+  }
+}

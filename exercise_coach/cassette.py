@@ -87,13 +87,29 @@ def parse_workout(text: str) -> list[Exercise]:
 # Cassette loading
 # ---------------------------------------------------------------------------
 
+# Schema versions this player fully understands. Unknown (future) versions
+# get a one-line stderr warning and best-effort parsing — never a crash.
+KNOWN_VERSIONS = ("1.0", "1.1", "1.2")
+
+
 def load_cassette(path: str) -> Cassette:
     """Load and validate a cassette JSON file."""
     return load_cassette_from_dict(json.loads(Path(path).read_text()))
 
 
 def load_cassette_from_dict(data: dict) -> Cassette:
-    """Build a Cassette from a parsed JSON dict."""
+    """Build a Cassette from a parsed JSON dict.
+
+    Unknown fields anywhere are silently ignored (forward compat).
+    """
+    version = data.get("version", "1.0")
+    if version not in KNOWN_VERSIONS:
+        print(
+            f"Warning: unknown cassette version {version!r} "
+            f"(supported: {', '.join(KNOWN_VERSIONS)}); attempting best-effort playback.",
+            file=sys.stderr,
+        )
+
     rest_default = data.get("meta", {}).get("rest_default", 75)
 
     phases = []
@@ -104,7 +120,7 @@ def load_cassette_from_dict(data: dict) -> Cassette:
 
             rounds = g.get("rounds", 1)
             exercises = []
-            for ex in g["exercises"]:
+            for ex in g.get("exercises", []):
                 sets = [SetData(reps=s["reps"]) for s in ex.get("sets", [])]
                 # If sets not specified, generate from rounds
                 if not sets:
@@ -120,6 +136,8 @@ def load_cassette_from_dict(data: dict) -> Cassette:
                 exercises.append(ExerciseData(
                     name=ex["name"], load=ex.get("load", ""),
                     timed=ex.get("timed", False), sets=sets,
+                    tempo=ex.get("tempo"),
+                    per_side=bool(ex.get("per_side", False)),
                 ))
 
             timed_cues = []
@@ -152,7 +170,7 @@ def load_cassette_from_dict(data: dict) -> Cassette:
     ]
 
     return Cassette(
-        version=data.get("version", "1.0"),
+        version=version,
         meta=data.get("meta", {}),
         phases=phases,
         context_exercises=ctx,
