@@ -1,40 +1,42 @@
-"""Main playback loop and its interactive screens."""
+"""The player state machine: an explicit playhead over the cassette.
+
+`Player` replaces the old quadruply-nested playback loops. It holds the
+cassette plus a playhead (`phase_idx, group_idx, round_idx, ex_idx`) and
+reacts to typed `Event`s returned by the screens in `screens.py`.
+
+Movement is non-destructive: `previous_group` ('b') just moves the playhead
+back one group — progress is never cleared. On arrival a group resumes at
+its first incomplete set. `advance_group` moves to the next incomplete group
+in cassette order, skipping done/skipped ones.
+"""
 
 import time
+from typing import Callable
 
 from rich.console import Console
 from rich.live import Live
-from rich.panel import Panel
-from rich.text import Text
 
-from .audio import play_sound, sound_group_complete, sound_rest_done, sound_set_complete
-from .cassette import count_sets, rounds_completed
-from .models import Cassette, ExerciseData, Group, TimedCue
-from .state import clear_state, print_log, save_log, save_state
-from .term import WorkoutPaused, drain_stdin, enter_cbreak, read_key, restore_terminal
-from .tts import say, say_sync, speak, terminate_say
-from .ui import (
-    build_active_panel,
-    build_overview,
-    build_progress_bar,
-    build_rest_panel,
-    render_layout,
+from .audio import play_sound, sound_group_complete, sound_set_complete
+from .cassette import all_groups, count_sets, rounds_completed
+from .events import Event
+from .models import Cassette, Group
+from .screens import (
+    context_screen,
+    get_failure_reps,
+    rep_set_screen,
+    rest_timer,
+    timed_hold,
+    transition_screen,
 )
+from .state import clear_state, print_log, save_log, save_state
+from .tts import say, speak
 
-OVERTIME_NAGS = [
-    "Rest is over, let's go.",
-    "Time's up.",
-    "Clock's done, you're not.",
-    "Let's move.",
-]
-
-
-# ---------------------------------------------------------------------------
-# Cassette helpers (player-side, mutating or voice-coupled)
-# ---------------------------------------------------------------------------
 
 def clear_group_progress(group: Group) -> None:
-    """Reset all completed sets in a group so it can be replayed."""
+    """Reset all completed sets in a group so it can be replayed.
+
+    Kept for the future explicit 'redo' action — the only deliberately
+    destructive operation. Normal navigation never clears progress."""
     group.skipped = False
     for ex in group.exercises:
         for s in ex.sets:
@@ -42,341 +44,260 @@ def clear_group_progress(group: Group) -> None:
             s.failure = False
 
 
-def go_back_to_previous_group(
-    cassette: Cassette, cur_pi: int, cur_gi: int,
-) -> tuple[int, int] | None:
-    """Go back to the previous group (opposite of skip).
-    Clears progress in both the current and target groups.
-    Returns (phase_idx, group_idx) of the target group, or None if at the start."""
-    # Build flat list of (phase_idx, group_idx) pairs
-    all_groups = []
-    for pi, phase in enumerate(cassette.phases):
-        for gi in range(len(phase.groups)):
-            all_groups.append((pi, gi))
-
-    # Find current position in the flat list
-    try:
-        pos = all_groups.index((cur_pi, cur_gi))
-    except ValueError:
-        return None
-
-    if pos == 0:
-        return None  # already at the very first group
-
-    target_pi, target_gi = all_groups[pos - 1]
-
-    # Clear progress in current group
-    clear_group_progress(cassette.phases[cur_pi].groups[cur_gi])
-    # Clear progress in target group so it replays
-    clear_group_progress(cassette.phases[target_pi].groups[target_gi])
-
-    return (target_pi, target_gi)
-
-
-def get_cues_for_round(group: Group, round_idx: int) -> list[TimedCue]:
-    if round_idx < len(group.voice_during_set):
-        return group.voice_during_set[round_idx]
-    return []
-
-
 def speak_round_complete(group: Group, round_idx: int) -> None:
     if round_idx < len(group.voice_round_complete):
         speak(group.voice_round_complete[round_idx])
 
 
-# ---------------------------------------------------------------------------
-# Pause
-# ---------------------------------------------------------------------------
+def group_done(group: Group) -> bool:
+    """A group is done when it was skipped or all its rounds are complete."""
+    if group.skipped or not group.exercises:
+        return True
+    return rounds_completed(group) >= group.rounds
 
-def pause_screen(
-    live: Live, cassette: Cassette, cur_phase: int, cur_group: int,
-    avg_rep_set: float = 30.0,
-) -> float:
-    """Show pause overlay. Returns seconds spent paused."""
-    terminate_say()
 
-    start = time.time()
-    enter_cbreak()
-    drain_stdin()
+class Player:
+    """Explicit-playhead state machine over a cassette.
 
-    try:
+    `now` and `read_key` are injectable (default: real clock/terminal) so the
+    player can be driven headlessly in tests. `sleep` likewise.
+    """
+
+    def __init__(
+        self,
+        cassette: Cassette,
+        cassette_path: str | None = None,
+        *,
+        now: Callable[[], float] = time.time,
+        read_key: Callable[[], str] | None = None,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self.cassette = cassette
+        self.cassette_path = cassette_path
+        self.now = now
+        self.read_key = read_key
+        self.sleep = sleep
+
+        # Playhead
+        self.phase_idx = 0
+        self.group_idx = 0
+        self.round_idx = 0
+        self.ex_idx = 0
+
+        self.rep_set_durations: list[float] = []
+
+    # -- playhead queries ---------------------------------------------------
+
+    def current_group(self) -> Group:
+        return self.cassette.phases[self.phase_idx].groups[self.group_idx]
+
+    def is_complete(self) -> bool:
+        """True when every group in the cassette is done or skipped."""
+        return all(group_done(g) for _, _, g in all_groups(self.cassette))
+
+    def _flat_pos(self) -> tuple[list[tuple[int, int, Group]], int]:
+        groups = all_groups(self.cassette)
+        for i, (pi, gi, _) in enumerate(groups):
+            if (pi, gi) == (self.phase_idx, self.group_idx):
+                return groups, i
+        raise ValueError(f"playhead ({self.phase_idx},{self.group_idx}) not in cassette")
+
+    # -- playhead moves -----------------------------------------------------
+
+    def jump_to(self, phase_idx: int, group_idx: int) -> None:
+        """Move the playhead to a group; resume at its first incomplete set."""
+        self.phase_idx = phase_idx
+        self.group_idx = group_idx
+        self.round_idx = rounds_completed(self.current_group())
+        self.ex_idx = 0
+
+    def advance_set(self) -> None:
+        """Advance past the current set slot; rolls into the next round after
+        the last exercise of a round."""
+        group = self.current_group()
+        self.ex_idx += 1
+        if self.ex_idx >= len(group.exercises):
+            self.ex_idx = 0
+            self.round_idx += 1
+
+    def advance_group(self) -> bool:
+        """Move to the next incomplete group in cassette order, skipping
+        done/skipped ones (wrapping to earlier incomplete groups if needed).
+        Returns False when nothing is left to play."""
+        groups, pos = self._flat_pos()
+        for pi, gi, group in groups[pos + 1:] + groups[:pos]:
+            if not group_done(group):
+                self.jump_to(pi, gi)
+                return True
+        return False
+
+    def previous_group(self) -> bool:
+        """Move the playhead back one group. Pure playhead move — no progress
+        is cleared. Returns False when already at the first group."""
+        groups, pos = self._flat_pos()
+        if pos == 0:
+            return False
+        pi, gi, _ = groups[pos - 1]
+        self.jump_to(pi, gi)
+        return True
+
+    # -- playback -----------------------------------------------------------
+
+    def avg_rep_set(self) -> float:
+        if self.rep_set_durations:
+            return sum(self.rep_set_durations) / len(self.rep_set_durations)
+        return 30.0
+
+    def run(self, live: Live) -> None:
+        """Play from the playhead until the cassette is complete."""
+        if group_done(self.current_group()) and not self.advance_group():
+            return
+
+        via_back = False
+        spoken_phase: int | None = None
         while True:
-            overview = build_overview(cassette, cur_phase, cur_group)
-            panel = Panel(
-                Text("PAUSED", style="bold yellow", justify="center"),
-                subtitle="p = resume  •  Ctrl-Z = suspend to shell",
-                border_style="yellow", expand=True, padding=(2, 4),
-            )
-            progress_text = build_progress_bar(cassette, avg_rep_set)
-            render_layout(live, overview, panel, progress_text)
+            if not via_back and self.phase_idx != spoken_phase:
+                speak(self.cassette.phases[self.phase_idx].voice_intro)
+            spoken_phase = self.phase_idx
 
-            key = read_key()
-            if key in ("p", "enter"):
-                drain_stdin()
-                break
-            if key == "ctrl-z":
-                raise WorkoutPaused()
-
-            time.sleep(0.25)
-    finally:
-        restore_terminal()
-
-    return time.time() - start
-
-
-def transition_screen(
-    live: Live, cassette: Cassette, cur_phase: int, cur_group: int,
-    group: Group, avg_rep_set: float = 30.0,
-) -> str:
-    """Show a setup/transition screen between groups. Blocks until Enter.
-    Returns 'go_back' if b pressed, 'done' otherwise."""
-    # Build description of what's next
-    exercises_desc = []
-    for ex in group.exercises:
-        line = f"[bold]{ex.name}[/bold]"
-        if ex.load:
-            line += f"  ({ex.load})"
-        exercises_desc.append(line)
-
-    content = "[bold cyan]Next up:[/bold cyan]\n" + "\n".join(exercises_desc)
-    if group.setup:
-        content += f"\n\n[yellow]{group.setup}[/yellow]"
-    content += "\n\n[dim]Enter = ready  •  s = skip  •  b = back[/dim]"
-
-    # Voice the transition
-    names = [ex.name for ex in group.exercises]
-    voice_line = "Next up: " + " and ".join(names)
-    if group.exercises and group.exercises[0].load:
-        voice_line += f", {group.exercises[0].load}"
-    say(voice_line)
-
-    enter_cbreak()
-    drain_stdin()
-
-    try:
-        while True:
-            overview = build_overview(cassette, cur_phase, cur_group)
-            panel = Panel(
-                content, title="Setup", border_style="cyan", expand=True, padding=(1, 4),
-            )
-            progress_text = build_progress_bar(cassette, avg_rep_set)
-            render_layout(live, overview, panel, progress_text)
-
-            key = read_key()
-            if key == "enter":
-                break
-            elif key == "p":
-                restore_terminal()
-                pause_screen(live, cassette, cur_phase, cur_group, avg_rep_set)
-                enter_cbreak()
-                drain_stdin()
+            ev = self.play_group(live, via_back)
+            via_back = False
+            if ev is Event.BACK:
+                if self.previous_group():
+                    via_back = True
                 continue
-            elif key == "s":
-                group.skipped = True
-                break
-            elif key == "b":
-                drain_stdin()
-                restore_terminal()
-                return "go_back"
-            elif key == "ctrl-z":
-                raise WorkoutPaused()
+            if not self.advance_group():
+                return
 
-            time.sleep(0.25)
-    finally:
-        restore_terminal()
+    def play_group(self, live: Live, via_back: bool = False) -> Event:
+        """Play the group under the playhead from its first incomplete set.
+        Returns DONE when the group finished or was skipped, BACK on 'b'."""
+        group = self.current_group()
+        pi, gi = self.phase_idx, self.group_idx
+        self.round_idx = rounds_completed(group)
+        self.ex_idx = 0
 
-    return "done"
+        if not group.exercises:
+            return Event.DONE
 
+        if self.round_idx >= group.rounds:
+            # Already complete on arrival (e.g. 'b' onto a finished group):
+            # nothing to play, and no completion fanfare either.
+            return Event.DONE
 
-# ---------------------------------------------------------------------------
-# Rest timer
-# ---------------------------------------------------------------------------
+        if via_back:
+            # Landing on a skipped group via back makes it playable again
+            # (progress itself is never touched).
+            group.skipped = False
+        else:
+            if self.round_idx == 0:
+                ev = transition_screen(
+                    live, self.cassette, pi, gi, group, self.avg_rep_set(),
+                    now=self.now, read_key=self.read_key, sleep=self.sleep,
+                )
+                if ev is Event.BACK:
+                    return Event.BACK
+                if ev is Event.SKIP:
+                    group.skipped = True
+                    return Event.DONE
+            speak(group.voice_intro)
 
-def rest_timer(
-    cassette: Cassette, cur_phase: int, cur_group: int,
-    rest_seconds: int, live: Live, avg_rep_set: float = 30.0,
-) -> str:
-    """Countdown rest timer. Returns 'skip_group' if s pressed, else 'done'."""
-    start = time.time()
-    nag_count = 0
-    rest_done_dinged = False
+        while self.round_idx < group.rounds:
+            r = self.round_idx
+            ex = group.exercises[self.ex_idx]
+            set_data = ex.sets[r]
 
-    enter_cbreak()
-    drain_stdin()
+            if set_data.actual_reps is None:
+                if ex.timed:
+                    ev = timed_hold(
+                        live, self.cassette, pi, gi, group, ex, r, self.ex_idx,
+                        self.avg_rep_set(),
+                        now=self.now, read_key=self.read_key, sleep=self.sleep,
+                    )
+                    if ev is Event.SKIP:
+                        return self._skip_group(group, r)
+                    if ev is Event.BACK:
+                        return Event.BACK
+                    set_data.actual_reps = set_data.reps
+                else:
+                    set_start = self.now()
+                    ev, paused_secs = rep_set_screen(
+                        live, self.cassette, pi, gi, group, ex, r, self.ex_idx,
+                        self.avg_rep_set(),
+                        now=self.now, read_key=self.read_key, sleep=self.sleep,
+                    )
+                    if ev is Event.SKIP:
+                        return self._skip_group(group, r)
+                    if ev is Event.BACK:
+                        return Event.BACK
+                    if ev is Event.FAIL:
+                        actual = get_failure_reps(
+                            live, self.cassette, pi, gi, group, ex, r, self.ex_idx,
+                            set_data.reps, self.avg_rep_set(),
+                            now=self.now, read_key=self.read_key, sleep=self.sleep,
+                        )
+                        set_data.actual_reps = actual
+                        set_data.failure = True
+                    else:
+                        set_data.actual_reps = set_data.reps
+                    self.rep_set_durations.append(self.now() - set_start - paused_secs)
 
-    try:
-        while True:
-            elapsed = time.time() - start
-            remaining = rest_seconds - elapsed
-            overtime = remaining < 0
+                # Set complete
+                play_sound(sound_set_complete())
 
-            if overtime:
-                if not rest_done_dinged:
-                    rest_done_dinged = True
-                    play_sound(sound_rest_done())
-                overtime_secs = int(-remaining)
-                if overtime_secs >= 15 and overtime_secs // 15 > nag_count:
-                    nag_count = overtime_secs // 15
-                    say(OVERTIME_NAGS[nag_count % len(OVERTIME_NAGS)])
+            last_in_round = self.ex_idx == len(group.exercises) - 1
+            self.advance_set()
 
-            overview = build_overview(cassette, cur_phase, cur_group)
-            panel = build_rest_panel(rest_seconds, remaining, overtime)
-            progress_text = build_progress_bar(cassette, avg_rep_set)
-            render_layout(live, overview, panel, progress_text)
+            if last_in_round:
+                # Round complete
+                speak_round_complete(group, r)
+                play_sound(sound_set_complete())
+                save_state(
+                    self.cassette,
+                    {"phase_idx": pi, "group_idx": gi, "round_idx": r + 1},
+                    self.cassette_path,
+                )
 
-            key = read_key()
-            if key == "enter":
-                break
-            elif key == "s":
-                drain_stdin()
-                return "skip_group"
-            elif key == "b":
-                drain_stdin()
-                return "go_back"
-            elif key == "p":
-                restore_terminal()
-                paused = pause_screen(live, cassette, cur_phase, cur_group, avg_rep_set)
-                start += paused
-                enter_cbreak()
-                drain_stdin()
-                continue
-            elif key == "ctrl-z":
-                raise WorkoutPaused()
+                # Rest (not after the group's final round)
+                if r < group.rounds - 1:
+                    ev = rest_timer(
+                        live, self.cassette, pi, gi, group.rest, self.avg_rep_set(),
+                        now=self.now, read_key=self.read_key, sleep=self.sleep,
+                    )
+                    if ev is Event.SKIP:
+                        return self._skip_group(group, r + 1)
+                    if ev is Event.BACK:
+                        return Event.BACK
 
-            time.sleep(0.25)
-    finally:
-        restore_terminal()
+        # Group complete
+        if not group.skipped:
+            speak(group.voice_group_complete)
+            play_sound(sound_group_complete())
+        return Event.DONE
 
-    return "done"
-
-
-# ---------------------------------------------------------------------------
-# Timed hold
-# ---------------------------------------------------------------------------
-
-def timed_hold(
-    cassette: Cassette, cur_phase: int, cur_group: int,
-    group: Group, ex: ExerciseData, round_idx: int, ex_idx: int,
-    live: Live, avg_rep_set: float = 30.0,
-) -> str:
-    """Run a timed hold. Returns 'skip_group' if s pressed, else 'done'."""
-    duration = ex.sets[round_idx].reps
-    cues = get_cues_for_round(group, round_idx)
-
-    # Get in position
-    say_sync("Get in position")
-    for countdown in range(3, 0, -1):
-        overview = build_overview(cassette, cur_phase, cur_group)
-        panel = build_active_panel(
-            cassette, group, ex, round_idx, ex_idx,
-            status="Get in position...", timer_text=str(countdown), timer_style="bold yellow",
+    def _skip_group(self, group: Group, round_idx: int) -> Event:
+        group.skipped = True
+        say(f"Skipping {group.exercises[0].name}")
+        save_state(
+            self.cassette,
+            {"phase_idx": self.phase_idx, "group_idx": self.group_idx, "round_idx": round_idx},
+            self.cassette_path,
         )
-        progress_text = build_progress_bar(cassette, avg_rep_set)
-        render_layout(live, overview, panel, progress_text)
-        time.sleep(1)
-
-    say("Go")
-
-    cue_idx = 0
-    start = time.time()
-
-    enter_cbreak()
-    drain_stdin()
-
-    try:
-        while True:
-            elapsed = time.time() - start
-            remaining = duration - elapsed
-            if remaining <= 0:
-                break
-
-            # Fire cues at their timestamps
-            if cue_idx < len(cues) and elapsed >= cues[cue_idx].at_seconds:
-                say(cues[cue_idx].line)
-                cue_idx += 1
-
-            secs_left = int(remaining) + 1
-            overview = build_overview(cassette, cur_phase, cur_group)
-            panel = build_active_panel(
-                cassette, group, ex, round_idx, ex_idx,
-                status="HOLD!", timer_text=f"{secs_left}s", timer_style="bold green",
-            )
-            progress_text = build_progress_bar(cassette, avg_rep_set)
-            render_layout(live, overview, panel, progress_text)
-
-            key = read_key()
-            if key == "s":
-                drain_stdin()
-                restore_terminal()
-                return "skip_group"
-            elif key == "b":
-                drain_stdin()
-                restore_terminal()
-                return "go_back"
-            elif key == "p":
-                restore_terminal()
-                paused = pause_screen(live, cassette, cur_phase, cur_group, avg_rep_set)
-                start += paused
-                enter_cbreak()
-                drain_stdin()
-                continue
-            elif key == "ctrl-z":
-                raise WorkoutPaused()
-
-            time.sleep(0.25)
-    finally:
-        restore_terminal()
-
-    say("Done")
-    return "done"
+        return Event.DONE
 
 
 # ---------------------------------------------------------------------------
-# Failure input flow
+# Top-level playback
 # ---------------------------------------------------------------------------
 
-def get_failure_reps(
-    cassette: Cassette, cur_phase: int, cur_group: int,
-    group: Group, ex: ExerciseData, round_idx: int, ex_idx: int,
-    target_reps: int, live: Live, avg_rep_set: float = 30.0,
-) -> int:
-    """Prompt for actual reps after failure. Returns clamped rep count."""
-    digits = ""
-    enter_cbreak()
-    drain_stdin()
-    try:
-        while True:
-            display_reps = digits if digits else "_"
-            overview = build_overview(cassette, cur_phase, cur_group)
-            panel = build_active_panel(
-                cassette, group, ex, round_idx, ex_idx,
-                status=f"Reps completed: {display_reps}",
-                timer_text="Type number, then Enter", timer_style="bold yellow",
-            )
-            progress_text = build_progress_bar(cassette, avg_rep_set)
-            render_layout(live, overview, panel, progress_text)
-
-            key = read_key()
-            if key == "enter":
-                break
-            elif key and key.isdigit():
-                digits += key
-            elif key == "\x7f" and digits:  # backspace
-                digits = digits[:-1]
-
-            time.sleep(0.1)
-    finally:
-        restore_terminal()
-
-    actual = int(digits) if digits else 0
-    return min(actual, target_reps)
-
-
-# ---------------------------------------------------------------------------
-# Main playback loop
-# ---------------------------------------------------------------------------
-
-def play_cassette(cassette: Cassette, cassette_path: str | None = None) -> None:
+def play_cassette(
+    cassette: Cassette,
+    cassette_path: str | None = None,
+    *,
+    now: Callable[[], float] = time.time,
+    read_key: Callable[[], str] | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
     """Play a cassette from start to finish (or from resume position)."""
     console = Console()
 
@@ -388,224 +309,19 @@ def play_cassette(cassette: Cassette, cassette_path: str | None = None) -> None:
         save_log(cassette)
         return
 
-    rep_set_durations: list[float] = []
-
-    def avg_rep_set() -> float:
-        return sum(rep_set_durations) / len(rep_set_durations) if rep_set_durations else 30.0
+    player = Player(cassette, cassette_path, now=now, read_key=read_key, sleep=sleep)
 
     speak(cassette.voice_session_intro)
 
     with Live(console=console, refresh_per_second=4, screen=True) as live:
-        # Context exercises
-        if cassette.context_exercises:
-            for ctx in cassette.context_exercises:
-                speak(ctx.voice)
-                overview = build_overview(cassette, -1, -1)
-                ctx_panel = Panel(
-                    f"[bold]{ctx.name}[/bold]\n{ctx.note}\n\nPress Enter to continue",
-                    title="Context", border_style="yellow", expand=True,
-                )
-                progress_text = build_progress_bar(cassette, avg_rep_set())
-                render_layout(live, overview, ctx_panel, progress_text)
-                enter_cbreak()
-                drain_stdin()
-                try:
-                    while True:
-                        key = read_key()
-                        if key == "enter":
-                            break
-                        elif key == "p":
-                            restore_terminal()
-                            pause_screen(live, cassette, -1, -1, avg_rep_set())
-                            enter_cbreak()
-                            drain_stdin()
-                            continue
-                        elif key == "ctrl-z":
-                            raise WorkoutPaused()
-                        time.sleep(0.25)
-                finally:
-                    restore_terminal()
+        for ctx in cassette.context_exercises:
+            speak(ctx.voice)
+            context_screen(
+                live, cassette, ctx.name, ctx.note, player.avg_rep_set(),
+                now=now, read_key=read_key, sleep=sleep,
+            )
 
-        # Walk phases → groups → rounds → exercises
-        pi = 0
-        start_gi = 0
-        resuming = False
-        while pi < len(cassette.phases):
-            phase = cassette.phases[pi]
-            if not resuming:
-                speak(phase.voice_intro)
-
-            gi = start_gi
-            start_gi = 0
-            jump_back = None
-
-            while gi < len(phase.groups):
-                group = phase.groups[gi]
-                if group.skipped:
-                    gi += 1
-                    continue
-
-                # Transition screen between groups (not before the first unstarted group)
-                already_started = rounds_completed(group) > 0
-                if not already_started and not resuming:
-                    tr_result = transition_screen(live, cassette, pi, gi, group, avg_rep_set())
-                    if tr_result == "go_back":
-                        back_result = go_back_to_previous_group(cassette, pi, gi)
-                        if back_result is not None:
-                            jump_back = back_result
-                            break
-                        continue
-                    if group.skipped:
-                        gi += 1
-                        continue
-
-                if not resuming:
-                    speak(group.voice_intro)
-                resuming = False
-
-                skip_group = False
-                round_idx = rounds_completed(group)
-
-                while round_idx < group.rounds:
-                    if skip_group:
-                        break
-
-                    for ei, ex in enumerate(group.exercises):
-                        if skip_group or jump_back is not None:
-                            break
-
-                        set_data = ex.sets[round_idx]
-                        if set_data.actual_reps is not None:
-                            continue  # already done (resume)
-
-                        if ex.timed:
-                            result = timed_hold(
-                                cassette, pi, gi, group, ex, round_idx, ei,
-                                live, avg_rep_set(),
-                            )
-                            if result == "skip_group":
-                                skip_group = True
-                                break
-                            if result == "go_back":
-                                back_result = go_back_to_previous_group(cassette, pi, gi)
-                                if back_result is not None:
-                                    jump_back = back_result
-                                break
-                            set_data.actual_reps = set_data.reps
-                        else:
-                            # Rep-based: show panel, wait for key
-                            set_start = time.time()
-                            key_hint = "Enter = done  •  f = failed  •  s = skip  •  b = back  •  p = pause"
-                            enter_cbreak()
-                            drain_stdin()
-                            try:
-                                while True:
-                                    overview = build_overview(cassette, pi, gi)
-                                    panel = build_active_panel(
-                                        cassette, group, ex, round_idx, ei,
-                                        status=key_hint,
-                                    )
-                                    progress_text = build_progress_bar(cassette, avg_rep_set())
-                                    render_layout(live, overview, panel, progress_text)
-
-                                    key = read_key()
-                                    if key == "enter":
-                                        set_data.actual_reps = set_data.reps
-                                        break
-                                    elif key == "f":
-                                        restore_terminal()
-                                        actual = get_failure_reps(
-                                            cassette, pi, gi, group, ex,
-                                            round_idx, ei, set_data.reps,
-                                            live, avg_rep_set(),
-                                        )
-                                        set_data.actual_reps = actual
-                                        set_data.failure = True
-                                        enter_cbreak()
-                                        break
-                                    elif key == "s":
-                                        drain_stdin()
-                                        skip_group = True
-                                        break
-                                    elif key == "b":
-                                        back_result = go_back_to_previous_group(cassette, pi, gi)
-                                        if back_result is not None:
-                                            jump_back = back_result
-                                        break
-                                    elif key == "p":
-                                        restore_terminal()
-                                        paused = pause_screen(live, cassette, pi, gi, avg_rep_set())
-                                        set_start += paused
-                                        enter_cbreak()
-                                        drain_stdin()
-                                        continue
-                                    elif key == "ctrl-z":
-                                        raise WorkoutPaused()
-
-                                    time.sleep(0.25)
-                            finally:
-                                restore_terminal()
-
-                            if not skip_group and jump_back is None:
-                                rep_set_durations.append(time.time() - set_start)
-
-                        if skip_group or jump_back is not None:
-                            break
-
-                        # Set complete
-                        play_sound(sound_set_complete())
-
-                    if jump_back is not None:
-                        break
-
-                    if skip_group:
-                        group.skipped = True
-                        say(f"Skipping {group.exercises[0].name}")
-                        save_state(cassette, {"phase_idx": pi, "group_idx": gi, "round_idx": round_idx}, cassette_path)
-                        break
-
-                    # Round complete
-                    speak_round_complete(group, round_idx)
-                    play_sound(sound_set_complete())
-                    save_state(cassette, {"phase_idx": pi, "group_idx": gi, "round_idx": round_idx + 1}, cassette_path)
-
-                    # Rest (skip after last round of last group of last phase)
-                    if round_idx < group.rounds - 1:
-                        result = rest_timer(
-                            cassette, pi, gi, group.rest, live, avg_rep_set(),
-                        )
-                        if result == "skip_group":
-                            group.skipped = True
-                            say(f"Skipping {group.exercises[0].name}")
-                            save_state(cassette, {"phase_idx": pi, "group_idx": gi, "round_idx": round_idx + 1}, cassette_path)
-                            break
-                        if result == "go_back":
-                            back_result = go_back_to_previous_group(cassette, pi, gi)
-                            if back_result is not None:
-                                jump_back = back_result
-                                break
-                            continue
-
-                    round_idx += 1
-
-                if jump_back is not None:
-                    break
-
-                # Group complete
-                if not group.skipped:
-                    speak(group.voice_group_complete)
-                    play_sound(sound_group_complete())
-
-                gi += 1
-
-            if jump_back is not None:
-                target_pi, target_gi = jump_back
-                pi = target_pi
-                start_gi = target_gi
-                resuming = True
-                continue
-
-            pi += 1
+        player.run(live)
 
     speak(cassette.voice_session_complete)
     console.print("[bold green]Workout complete![/bold green]\n")
