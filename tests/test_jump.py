@@ -145,6 +145,25 @@ class TestSetRows:
         rows = build_set_rows(0, 0, c.phases[0].groups[0])
         assert rows[0].label == "set 1 · Plank ×30s"
 
+    def test_hold_statuses_show_seconds_not_reps(self):
+        """A recorded hold's actuals are seconds: '✗ 21s (failed)' / '✓ 30s'
+        (rep-set statuses stay bare, as asserted above)."""
+        raw = cassette({
+            "type": "straight", "rounds": 2, "rest": 30,
+            "exercises": [{"name": "Plank", "timed": True, "reps": 30}],
+        })
+        c = load_cassette_from_dict(raw)
+        g = c.phases[0].groups[0]
+        g.exercises[0].sets[0].actual_reps = 21
+        g.exercises[0].sets[0].failure = True
+        g.exercises[0].sets[1].actual_reps = 30
+
+        rows = build_set_rows(0, 0, g)
+
+        assert rows[0].status == "✗ 21s (failed)"
+        assert rows[1].status == "✓ 30s"
+        assert [r.completed for r in rows] == [True, True]
+
 
 # ---------------------------------------------------------------------------
 # Menu state machine (pure key driving)

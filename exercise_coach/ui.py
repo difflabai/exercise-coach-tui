@@ -187,13 +187,40 @@ def format_eta(seconds: int) -> str:
     return f"{secs}s"
 
 
-def estimate_remaining(cassette: Cassette, avg_rep_set: float = 30.0) -> int:
-    """Estimate seconds remaining based on cassette state."""
-    remaining = 0
-    remaining_sets = 0
-    rest_total = 0
-    for phase in cassette.phases:
-        for group in phase.groups:
+# (phase_idx, group_idx) of every group whose rest was interrupted by 'b'/'j'
+# and will therefore restart in full on re-entry (the Player's _pending_rest —
+# the Player binds its live set here so every screen's progress bar sees it,
+# the same way the learned `settings.paces` reach build_progress_bar).
+pending_rests: set[tuple[int, int]] = set()
+
+
+def estimate_remaining(
+    cassette: Cassette, avg_rep_set: float = 30.0,
+    rest_remaining: float = 0.0, paces: dict[str, int] | None = None,
+    pending_rests: set[tuple[int, int]] | None = None,
+) -> int:
+    """Estimate seconds remaining based on cassette state.
+
+    Rest accounting: each group is charged one full rest *between* each pair
+    of its remaining rounds — `rounds_left - 1`. A rest currently counting
+    down belongs to the round already recorded, so the cassette alone can't
+    see it; the rest screen passes its live countdown as `rest_remaining`
+    (clamped at 0 in overtime) so the ETA slides down through the rest
+    instead of falling off a cliff the moment a round completes.
+
+    A rest interrupted by 'b'/'j' restarts in full when its group is
+    re-entered mid-round (the Player's pending-rest guarantee), so each
+    group in `pending_rests` that is still mid-round is charged one extra
+    full rest — otherwise the ETA under-states by a whole rest period while
+    the user is on any other group's screens.
+
+    Per-set charge: learned per-exercise pace (`paces`, median seconds from
+    past sessions) > this session's `avg_rep_set` > the 30s default the
+    caller bakes into `avg_rep_set`. Timed holds know their own duration.
+    """
+    remaining = int(max(0.0, rest_remaining))
+    for pi, phase in enumerate(cassette.phases):
+        for gi, group in enumerate(phase.groups):
             if group.skipped:
                 continue
             for ex in group.exercises:
@@ -201,15 +228,20 @@ def estimate_remaining(cassette: Cassette, avg_rep_set: float = 30.0) -> int:
                     if s.actual_reps is None:
                         if ex.timed:
                             remaining += s.reps + 3  # hold + countdown
+                        elif paces and ex.name in paces:
+                            remaining += int(paces[ex.name])
                         else:
                             remaining += int(avg_rep_set)
-                        remaining_sets += 1
-            # Estimate rest for remaining rounds
+            # Rests between the remaining rounds
             rc = rounds_completed(group)
             rounds_left = group.rounds - rc
             if rounds_left > 0:
-                rest_total += (rounds_left - 1) * group.rest
-    remaining += rest_total
+                remaining += (rounds_left - 1) * group.rest
+            # An interrupted rest that will replay on re-entry (the Player
+            # only restarts it mid-round: 0 < rc < rounds — mirroring
+            # play_group's guard, so a stale pending entry costs nothing).
+            if pending_rests and (pi, gi) in pending_rests and 0 < rc < group.rounds:
+                remaining += group.rest
     return remaining
 
 
@@ -220,13 +252,18 @@ def volume_label() -> str:
     return f"🔊 {audio_settings.percent()}%"
 
 
-def build_progress_bar(cassette: Cassette, avg_rep_set: float = 30.0) -> str:
+def build_progress_bar(
+    cassette: Cassette, avg_rep_set: float = 30.0, rest_remaining: float = 0.0,
+) -> str:
     total, done = count_sets(cassette)
     pct = done / total * 100 if total else 100
     bar_len = 30
     filled = int(bar_len * done / total) if total else bar_len
     bar = "█" * filled + "░" * (bar_len - filled)
-    eta = format_eta(estimate_remaining(cassette, avg_rep_set))
+    eta = format_eta(estimate_remaining(
+        cassette, avg_rep_set, rest_remaining, user_settings.paces,
+        pending_rests,
+    ))
     return (
         f"[bold cyan]Progress:[/bold cyan] {bar} {done}/{total} sets ({pct:.0f}%)"
         f"  ⏱ ETA: {eta}  {volume_label()}"

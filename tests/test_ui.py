@@ -1,10 +1,13 @@
 """Tests for exercise_coach.ui: ETA formatting, remaining-time estimation,
-progress-bar math, and overview rendering (Rich snapshot substrings)."""
+pace persistence, progress-bar math, and overview rendering (Rich snapshot
+substrings)."""
 
+import json
 from io import StringIO
 
 from rich.console import Console
 
+from exercise_coach import settings as user_settings
 from exercise_coach.cassette import load_cassette_from_dict
 from exercise_coach.models import Cassette
 from exercise_coach.ui import (
@@ -102,6 +105,134 @@ class TestEstimateRemaining:
         assert estimate_remaining(cassette) == 6 * 30 + 2 * 90
 
 
+class TestEstimateRemainingLiveRestAndPaces:
+    """The §6 ETA fixes: the in-progress rest is charged via `rest_remaining`
+    (the cassette alone can't see it) and per-set charges prefer the learned
+    per-exercise pace over the session average."""
+
+    def test_live_rest_is_charged_on_top_of_structural_rests(self, straight_cassette):
+        cassette = load_cassette_from_dict(straight_cassette(rounds=3, rest=60))
+        complete_round(cassette.phases[0].groups[0], 0)
+        # Mid-rest after round 1, 45s on the clock: 2 sets + the one rest
+        # still between rounds 2 and 3 + the live 45s.
+        assert estimate_remaining(cassette, 30.0, rest_remaining=45) == 2 * 30 + 60 + 45
+
+    def test_round_boundary_has_no_cliff(self, straight_cassette):
+        """The instant a round completes, the estimate with the full rest
+        passed live must equal the pre-completion estimate minus only the
+        set that was just performed — not minus a whole rest period."""
+        cassette = load_cassette_from_dict(straight_cassette(rounds=3, rest=60))
+        before = estimate_remaining(cassette)  # 3*30 + 2*60 = 210
+        complete_round(cassette.phases[0].groups[0], 0)
+        at_rest_start = estimate_remaining(cassette, rest_remaining=60)
+        assert at_rest_start == before - 30
+
+    def test_overtime_rest_clamps_to_zero(self, straight_cassette):
+        cassette = load_cassette_from_dict(straight_cassette(rounds=2, rest=60))
+        complete_round(cassette.phases[0].groups[0], 0)
+        base = estimate_remaining(cassette)
+        assert estimate_remaining(cassette, rest_remaining=-12.5) == base
+
+    def test_learned_pace_beats_session_average(self, straight_cassette):
+        cassette = load_cassette_from_dict(
+            straight_cassette(name="Goblet Squat", rounds=2, rest=45)
+        )
+        est = estimate_remaining(cassette, 25.0, paces={"Goblet Squat": 18})
+        assert est == 2 * 18 + 45
+
+    def test_unknown_exercise_falls_back_to_session_average(self, straight_cassette):
+        cassette = load_cassette_from_dict(straight_cassette(rounds=2, rest=45))
+        est = estimate_remaining(cassette, 25.0, paces={"Some Other Lift": 18})
+        assert est == 2 * 25 + 45
+
+    def test_timed_holds_ignore_paces(self, timed_cassette):
+        cassette = load_cassette_from_dict(timed_cassette(rounds=1, seconds=30, rest=45))
+        assert estimate_remaining(cassette, paces={"Plank": 5}) == 30 + 3
+
+    def test_pending_rest_charges_one_extra_full_rest(self, straight_cassette):
+        """A rest interrupted by 'b'/'j' restarts in full on re-entry, so a
+        mid-round group in `pending_rests` costs one extra rest period —
+        without it the ETA under-states by the whole rest while the user is
+        on any other group's screens."""
+        cassette = load_cassette_from_dict(straight_cassette(rounds=2, rest=60))
+        complete_round(cassette.phases[0].groups[0], 0)
+        base = estimate_remaining(cassette)  # 1 set left, 0 structural rests
+        assert base == 30
+        assert estimate_remaining(cassette, pending_rests={(0, 0)}) == base + 60
+
+    def test_pending_rest_for_fresh_or_done_group_is_ignored(self, straight_cassette):
+        """Mirrors play_group's replay guard (0 < rc < rounds): a stale
+        pending entry for a fresh (redone) or completed group costs nothing."""
+        fresh = load_cassette_from_dict(straight_cassette(rounds=2, rest=60))
+        assert (
+            estimate_remaining(fresh, pending_rests={(0, 0)})
+            == estimate_remaining(fresh)
+        )
+        done = load_cassette_from_dict(straight_cassette(rounds=2, rest=60))
+        complete_round(done.phases[0].groups[0], 0)
+        complete_round(done.phases[0].groups[0], 1)
+        assert estimate_remaining(done, pending_rests={(0, 0)}) == 0
+
+
+class TestPaceSettings:
+    """settings.py pace persistence: merge-on-save, sanitizing, and the cap."""
+
+    def test_round_trip(self, isolated_state):
+        user_settings.update_paces({"Goblet Squat": 22, "Bench Press": 31})
+        user_settings.paces = {}
+        user_settings.load_paces()
+        assert user_settings.paces == {"Goblet Squat": 22, "Bench Press": 31}
+
+    def test_update_merges_and_keeps_other_settings_keys(self, isolated_state):
+        user_settings.save_data({"volume": 0.5, "buddy": False})
+        user_settings.update_paces({"Row": 28})
+        user_settings.update_paces({"Row": 25, "Curl": 19})
+
+        data = json.loads(user_settings.settings_file().read_text())
+        assert data["paces"] == {"Row": 25, "Curl": 19}
+        assert data["volume"] == 0.5
+        assert data["buddy"] is False
+
+    def test_invalid_and_nonpositive_entries_are_dropped(self, isolated_state):
+        user_settings.save_data({"paces": {"Good": 20, "Bad": "fast", "Zero": 0, "Flag": True}})
+        user_settings.load_paces()
+        assert user_settings.paces == {"Good": 20}
+        user_settings.update_paces({"Noise": 0})
+        assert "Noise" not in user_settings.paces
+
+    def test_infinity_and_nan_in_file_are_dropped_not_crashes(self, isolated_state):
+        """json.loads accepts Infinity/NaN/1e999 — a hand-edited or corrupt
+        file must never crash startup (load_paces) or the session-end
+        update_paces merge with an OverflowError."""
+        path = user_settings.settings_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            '{"paces": {"RDL": Infinity, "Curl": NaN, "Big": 1e999, "Good": 20}}'
+        )
+        user_settings.load_paces()
+        assert user_settings.paces == {"Good": 20}
+        user_settings.update_paces({"Squat": 25})  # merge path reads the file too
+        assert user_settings.paces == {"Good": 20, "Squat": 25}
+
+    def test_subsecond_float_is_dropped_not_stored_as_zero(self, isolated_state):
+        """0.5 passed the old raw-value filter (0.5 > 0) but int() stored a
+        0 pace, making every remaining set of that exercise free in the ETA."""
+        user_settings.save_data({"paces": {"Squat": 0.5, "Row": 20.9}})
+        user_settings.load_paces()
+        assert user_settings.paces == {"Row": 20}  # truncated, but positive
+
+    def test_cap_evicts_longest_untouched_first(self, isolated_state):
+        user_settings.update_paces(
+            {f"Exercise {i}": 20 for i in range(user_settings.MAX_PACES)}
+        )
+        user_settings.update_paces({"Exercise 0": 21, "Newcomer": 30})
+
+        assert len(user_settings.paces) == user_settings.MAX_PACES
+        assert user_settings.paces["Newcomer"] == 30
+        assert user_settings.paces["Exercise 0"] == 21  # re-inserted, survives
+        assert "Exercise 1" not in user_settings.paces  # oldest untouched evicted
+
+
 # ---------------------------------------------------------------------------
 # build_progress_bar
 # ---------------------------------------------------------------------------
@@ -141,6 +272,29 @@ class TestBuildProgressBar:
         assert "█" * 30 in bar
         assert "0/0 sets (100%)" in bar
         assert "ETA: done" in bar
+
+    def test_learned_paces_reach_the_rendered_eta(self, straight_cassette):
+        """The end-to-end wiring finding: build_progress_bar must feed the
+        loaded user_settings.paces into estimate_remaining — with the global
+        set, the rendered ETA changes; disconnecting it (paces=None) would
+        fall back to 2*30+60 = "2m 00s"."""
+        cassette = load_cassette_from_dict(
+            straight_cassette(name="Goblet Squat", rounds=2, rest=60)
+        )
+        assert "ETA: 2m 00s" in build_progress_bar(cassette)  # default pace
+        user_settings.paces = {"Goblet Squat": 90}
+        assert "ETA: 4m 00s" in build_progress_bar(cassette)  # 2*90 + 60
+
+    def test_pending_rests_reach_the_rendered_eta(self, straight_cassette):
+        """Same wiring guarantee for ui.pending_rests (bound by the Player):
+        a mid-round pending rest must show up in every screen's ETA."""
+        from exercise_coach import ui
+
+        cassette = load_cassette_from_dict(straight_cassette(rounds=2, rest=60))
+        complete_round(cassette.phases[0].groups[0], 0)
+        assert "ETA: 30s" in build_progress_bar(cassette)  # one 30s set left
+        ui.pending_rests = {(0, 0)}
+        assert "ETA: 1m 30s" in build_progress_bar(cassette)  # + the owed 60s
 
 
 # ---------------------------------------------------------------------------

@@ -11,11 +11,14 @@ in cassette order, skipping done/skipped ones.
 """
 
 import time
+from statistics import median
 from typing import Callable
 
 from rich.console import Console
 from rich.live import Live
 
+from . import settings as user_settings
+from . import ui
 from .audio import play_sound, sound_group_complete, sound_set_complete
 from .buddy import celebrate
 from .cassette import all_groups, count_sets, rounds_completed
@@ -100,6 +103,9 @@ class Player:
         self.ex_idx = 0
 
         self.rep_set_durations: list[float] = []
+        # Per-exercise rep-set durations, for the persisted pace medians
+        # (timed holds already know their duration and are never tracked).
+        self.set_durations_by_name: dict[str, list[float]] = {}
 
         # (phase_idx, group_idx) of every group whose rest period was cut
         # short by 'b' (or 'j'). Re-entering such a group mid-round restarts
@@ -107,6 +113,10 @@ class Player:
         # A set, not a single slot: jumping around can interrupt several
         # groups' rests and each one stays owed independently.
         self._pending_rest: set[tuple[int, int]] = set()
+        # Every screen's ETA must charge the rests still owed here, but only
+        # this player knows them — publish the live set the same way the
+        # learned paces reach build_progress_bar (ui reads the module global).
+        ui.pending_rests = self._pending_rest
 
         # How to re-enter the interrupted group when the jump menu is
         # cancelled: True = the via_back way (no transition screen, no intro
@@ -176,6 +186,19 @@ class Player:
         if self.rep_set_durations:
             return sum(self.rep_set_durations) / len(self.rep_set_durations)
         return 30.0
+
+    def _record_rep_duration(self, name: str, secs: float) -> None:
+        self.rep_set_durations.append(secs)
+        self.set_durations_by_name.setdefault(name, []).append(secs)
+
+    def session_paces(self) -> dict[str, int]:
+        """Median observed rep-set seconds per exercise name this session —
+        what update_paces persists at session end so the NEXT session's ETA
+        is right from set one."""
+        return {
+            name: round(median(durs))
+            for name, durs in self.set_durations_by_name.items()
+        }
 
     def run(self, live: Live) -> None:
         """Play from the playhead until the cassette is complete."""
@@ -255,14 +278,26 @@ class Player:
         r = target.round_idx
 
         if ex.timed:
-            ev = timed_hold(
+            ev, held = timed_hold(
                 live, self.cassette, pi, gi, group, ex, r, target.ex_idx,
                 self.avg_rep_set(),
                 now=self.now, read_key=self.read_key, sleep=self.sleep,
             )
-            if ev is not Event.DONE:
+            if ev in (Event.SKIP, Event.BACK):
                 return
-            set_data.actual_reps = set_data.reps
+            if ev is Event.FAIL:
+                # "I broke earlier": prompt for the actual seconds held.
+                actual = get_failure_reps(
+                    live, self.cassette, pi, gi, group, ex, r, target.ex_idx,
+                    set_data.reps, self.avg_rep_set(),
+                    now=self.now, read_key=self.read_key, sleep=self.sleep,
+                )
+                set_data.actual_reps = actual
+                set_data.failure = True
+            else:
+                # Ended early via Enter (a shortfall is a failure) or ran out.
+                set_data.actual_reps = held
+                set_data.failure = held < set_data.reps
         else:
             set_start = self.now()
             ev, paused_secs = rep_set_screen(
@@ -270,6 +305,10 @@ class Player:
                 self.avg_rep_set(),
                 now=self.now, read_key=self.read_key, sleep=self.sleep,
             )
+            # Measure the set the moment its screen ends: the failure-reps
+            # prompt below is thinking-and-typing time, not set-work time,
+            # and must never pollute the learned pace.
+            set_secs = self.now() - set_start - paused_secs
             if ev in (Event.SKIP, Event.BACK, Event.JUMP):
                 return
             if ev is Event.FAIL:
@@ -282,7 +321,7 @@ class Player:
                 set_data.failure = True
             else:
                 set_data.actual_reps = set_data.reps
-            self.rep_set_durations.append(self.now() - set_start - paused_secs)
+            self._record_rep_duration(ex.name, set_secs)
 
         # Only now that a set was actually performed does the detour revive a
         # skipped group — an abandoned detour (the early returns above) must
@@ -393,7 +432,7 @@ class Player:
             if set_data.actual_reps is None:
                 played_in_round = True
                 if ex.timed:
-                    ev = timed_hold(
+                    ev, held = timed_hold(
                         live, self.cassette, pi, gi, group, ex, r, self.ex_idx,
                         self.avg_rep_set(),
                         now=self.now, read_key=self.read_key, sleep=self.sleep,
@@ -402,7 +441,20 @@ class Player:
                         return self._skip_group(group, r)
                     if ev is Event.BACK:
                         return Event.BACK
-                    set_data.actual_reps = set_data.reps
+                    if ev is Event.FAIL:
+                        # "I broke earlier": prompt for the actual seconds held.
+                        actual = get_failure_reps(
+                            live, self.cassette, pi, gi, group, ex, r, self.ex_idx,
+                            set_data.reps, self.avg_rep_set(),
+                            now=self.now, read_key=self.read_key, sleep=self.sleep,
+                        )
+                        set_data.actual_reps = actual
+                        set_data.failure = True
+                    else:
+                        # Ended early via Enter (a shortfall is a failure) or
+                        # the timer ran out (a full hold).
+                        set_data.actual_reps = held
+                        set_data.failure = held < set_data.reps
                 else:
                     set_start = self.now()
                     ev, paused_secs = rep_set_screen(
@@ -410,6 +462,10 @@ class Player:
                         self.avg_rep_set(),
                         now=self.now, read_key=self.read_key, sleep=self.sleep,
                     )
+                    # Measured before the failure-reps prompt can run: time
+                    # spent typing a missed-rep count is not set-work time
+                    # and must never pollute the learned pace.
+                    set_secs = self.now() - set_start - paused_secs
                     if ev is Event.SKIP:
                         return self._skip_group(group, r)
                     if ev is Event.BACK:
@@ -428,7 +484,7 @@ class Player:
                         set_data.failure = True
                     else:
                         set_data.actual_reps = set_data.reps
-                    self.rep_set_durations.append(self.now() - set_start - paused_secs)
+                    self._record_rep_duration(ex.name, set_secs)
 
                 # Set complete. No celebration after a reported failure —
                 # Rep cheering "Nailed it!" right after the user typed a
@@ -495,6 +551,13 @@ class Player:
 # Top-level playback
 # ---------------------------------------------------------------------------
 
+def _persist_paces(player: Player) -> None:
+    """Persist this session's learned per-exercise paces (at save_log time)."""
+    paces = player.session_paces()
+    if paces:
+        user_settings.update_paces(paces)
+
+
 def play_cassette(
     cassette: Cassette,
     cassette_path: str | None = None,
@@ -533,6 +596,7 @@ def play_cassette(
     console.print("[bold green]Workout complete![/bold green]\n")
     print_log(cassette)
     save_log(cassette)
+    _persist_paces(player)
     clear_state()
 
 
@@ -576,3 +640,4 @@ def play_only_group(
         console.print("\n[yellow]Stopped.[/yellow]")
     print("\n" + render_partial_log(cassette, phase_idx, group_idx) + "\n")
     save_partial_log(cassette, phase_idx, group_idx, label)
+    _persist_paces(player)

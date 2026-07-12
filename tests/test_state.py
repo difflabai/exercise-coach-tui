@@ -271,6 +271,16 @@ class TestFormatExerciseLog:
             s.actual_reps = 30
         assert state.format_exercise_log(ex, group) == f"{'Plank':<25} 2×30s"
 
+    def test_failed_hold_reports_seconds_held(self):
+        """Mirrors the rep-failure line, but the actuals carry the 's' unit
+        (the rep variant above stays byte-identical: bare number)."""
+        ex, group = _rep_group(name="Plank", load="", rounds=2, reps=30, timed=True)
+        ex.sets[0].actual_reps = 21
+        ex.sets[0].failure = True
+        assert state.format_exercise_log(ex, group) == (
+            f"{'Plank':<25} 2[0]×30s - failed at 21s on set 1"
+        )
+
 
 class TestRenderLog:
     def test_renders_context_then_every_exercise(self, fixture_cassette):

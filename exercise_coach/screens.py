@@ -380,7 +380,10 @@ def rest_timer(
             mood, mood_intensity = Mood.OVERTIME, float(state["nags"])
         else:
             mood, mood_intensity = Mood.RESTING, remaining  # seconds left: wakes Rep near 0
-        render_layout(live, overview, panel, build_progress_bar(cassette, avg_rep_set),
+        # The in-progress rest belongs to the round already recorded, so the
+        # cassette can't see it — pass the live countdown into the ETA.
+        progress = build_progress_bar(cassette, avg_rep_set, max(0.0, remaining))
+        render_layout(live, overview, panel, progress,
                       mood=mood, mood_intensity=mood_intensity, now=now())
 
     def on_paused(secs: float) -> None:
@@ -407,8 +410,19 @@ def timed_hold(
     now: Callable[[], float] = time.time,
     read_key: Callable[[], str] | None = None,
     sleep: Callable[[float], None] = time.sleep,
-) -> Event:
-    """Run a timed hold. Returns DONE, SKIP, or BACK."""
+) -> tuple[Event, int]:
+    """Run a timed hold. Returns (event, seconds held) — mirroring
+    rep_set_screen's tuple return so the caller can record the actual time.
+
+    - The timer running out returns (DONE, duration): a full hold.
+    - Enter ends the hold early, crediting the second in progress:
+      seconds held = int(elapsed) + 1, capped at the target — so ending
+      during the final displayed second rounds up to the full duration.
+      The caller records a shortfall (held < duration) as a failure.
+    - 'f' ("I broke earlier") returns (FAIL, 0); the caller prompts for the
+      actual seconds via get_failure_reps.
+    - SKIP/BACK return 0 seconds; nothing is recorded.
+    """
     duration = ex.sets[round_idx].reps
     cues = get_cues_for_round(group, round_idx)
 
@@ -441,10 +455,14 @@ def timed_hold(
                           now, read_key, sleep, countdown_on_paused),
     )
     if ev is not Event.DONE:
-        return ev
+        return ev, 0
 
     say("Go")
     state = {"start": now(), "cue_idx": 0, "remaining": float(duration)}
+    key_hint = (
+        "Enter = done early  •  f = broke earlier  •  s = skip  •  b = back"
+        "  •  p = pause  •  m/-/+ vol"
+    )
 
     def tick() -> Event | None:
         elapsed = now() - state["start"]
@@ -462,7 +480,8 @@ def timed_hold(
         overview = build_overview(cassette, cur_phase, cur_group)
         panel = build_active_panel(
             cassette, group, ex, round_idx, ex_idx,
-            status="HOLD!", timer_text=f"{secs_left}s", timer_style="bold green",
+            status=f"HOLD!\n[dim]{key_hint}[/dim]",
+            timer_text=f"{secs_left}s", timer_style="bold green",
         )
         # Fraction of the hold elapsed — Rep trembles harder as it approaches 1.
         elapsed_frac = min(1.0, max(0.0, 1 - state["remaining"] / duration)) if duration else 1.0
@@ -472,15 +491,23 @@ def timed_hold(
     def on_paused(secs: float) -> None:
         state["start"] += secs
 
+    # 'j' stays unmapped mid-hold (deliberate): unlike a rep set there is no
+    # way to abandon a hold into the jump menu without losing the clock.
     ev = run_screen(
-        live, render, {"s": Event.SKIP, "b": Event.BACK},
+        live, render,
+        {"enter": Event.DONE, "f": Event.FAIL, "s": Event.SKIP, "b": Event.BACK},
         tick=tick, now=now, read_key=read_key, sleep=sleep,
         pause=_make_pause(live, cassette, cur_phase, cur_group, avg_rep_set,
                           now, read_key, sleep, on_paused),
     )
-    if ev is Event.DONE:
+    if ev is not Event.DONE:
+        return ev, 0
+    # Credit the second in progress (documented boundary above): the timer
+    # running out lands at elapsed >= duration and caps to a full hold.
+    held = min(duration, int(now() - state["start"]) + 1)
+    if held >= duration:
         say("Done")
-    return ev
+    return ev, held
 
 
 # ---------------------------------------------------------------------------
@@ -537,15 +564,18 @@ def get_failure_reps(
     read_key: Callable[[], str] | None = None,
     sleep: Callable[[float], None] = time.sleep,
 ) -> int:
-    """Prompt for actual reps after failure. Returns clamped rep count."""
+    """Prompt for actual reps after failure — or, for a timed hold, the
+    actual seconds held ("I broke earlier"). Returns the count clamped to
+    the target (`target_reps` is the hold duration for timed exercises)."""
     state = {"digits": ""}
+    prompt = "Seconds held" if ex.timed else "Reps completed"
 
     def render() -> None:
         display_reps = state["digits"] if state["digits"] else "_"
         overview = build_overview(cassette, cur_phase, cur_group)
         panel = build_active_panel(
             cassette, group, ex, round_idx, ex_idx,
-            status=f"Reps completed: {display_reps}",
+            status=f"{prompt}: {display_reps}",
             timer_text="Type number, then Enter", timer_style="bold yellow",
         )
         render_layout(live, overview, panel, build_progress_bar(cassette, avg_rep_set),

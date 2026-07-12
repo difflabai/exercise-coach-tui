@@ -9,6 +9,7 @@ one-run --volume override must not overwrite the saved volume).
 """
 
 import json
+import math
 
 
 def settings_file():
@@ -38,6 +39,57 @@ def save_data(updates: dict) -> None:
         path.write_text(json.dumps(data))
     except OSError:
         pass
+
+
+# ---------------------------------------------------------------------------
+# Learned per-exercise pace (median rep-set seconds, for ETAs)
+# ---------------------------------------------------------------------------
+
+# Newest-last insertion order; update_paces evicts from the front past the cap.
+MAX_PACES = 200
+
+paces: dict[str, int] = {}
+
+
+def _read_paces() -> dict[str, int]:
+    """The persisted paces map, insertion order kept, invalid entries dropped."""
+    value = load_data().get("paces")
+    if not isinstance(value, dict):
+        return {}
+    # Filter on the *stored* value: json.loads happily yields Infinity/NaN
+    # (int() would raise) and floats in (0, 1) (int() would store a 0 pace),
+    # so require a finite value whose int() is still positive — the same
+    # int(secs) > 0 contract update_paces enforces.
+    return {
+        name: int(secs) for name, secs in value.items()
+        if isinstance(name, str)
+        and isinstance(secs, (int, float)) and not isinstance(secs, bool)
+        and math.isfinite(secs) and int(secs) > 0
+    }
+
+
+def load_paces() -> None:
+    """Load the persisted per-exercise paces into the module global."""
+    global paces
+    paces = _read_paces()
+
+
+def update_paces(updates: dict[str, int]) -> None:
+    """Merge this session's per-exercise paces into settings.json.
+
+    Updated names are re-inserted newest-last so the MAX_PACES eviction drops
+    the longest-untouched exercises, never the ones just performed."""
+    global paces
+    merged = _read_paces()
+    for name, secs in updates.items():
+        if int(secs) <= 0:  # a sub-half-second median is noise, not a pace
+            continue
+        merged.pop(name, None)
+        merged[name] = int(secs)
+    if len(merged) > MAX_PACES:
+        merged = dict(list(merged.items())[-MAX_PACES:])
+    paces = merged
+    save_data({"paces": merged})
 
 
 # ---------------------------------------------------------------------------

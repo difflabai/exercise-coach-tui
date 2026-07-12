@@ -421,3 +421,67 @@ class TestMainRestOverride:
         assert exc.value.code == 1
         assert "No exercises parsed" in capsys.readouterr().err
         assert played == []
+
+
+# ---------------------------------------------------------------------------
+# Startup wiring: persisted paces are loaded before playback
+# ---------------------------------------------------------------------------
+
+
+class TestStartupLoadsPaces:
+    def test_main_loads_persisted_paces_before_playing(
+        self, played, straight_cassette, tmp_path, monkeypatch,
+    ):
+        """The mutation gate: deleting main()'s user_settings.load_paces()
+        call must fail a test — otherwise the persisted paces silently never
+        reach the live ETA (build_progress_bar reads the module global)."""
+        from exercise_coach import settings as user_settings
+
+        user_settings.update_paces({"Squat": 42})
+        user_settings.paces = {}  # simulate a fresh process
+        forbid_input(monkeypatch)
+        path = write_cassette(tmp_path, straight_cassette())
+
+        run_main(monkeypatch, str(path))
+
+        assert user_settings.paces == {"Squat": 42}
+        assert len(played) == 1  # the workout actually started
+
+
+# ---------------------------------------------------------------------------
+# Test-process hermeticity: color-forcing env vars are neutralized
+# ---------------------------------------------------------------------------
+
+
+class TestColorEnvNeutralized:
+    """conftest deletes FORCE_COLOR & co. before Rich is imported and keeps
+    them out per-test — `FORCE_COLOR=3 pytest` once broke try_resume's capsys
+    assertions with ANSI escapes. Assert the neutralization directly (a
+    subprocess pytest-in-pytest run would be slow)."""
+
+    def test_color_forcing_vars_absent_from_environ(self):
+        import os
+        for var in ("FORCE_COLOR", "NO_COLOR", "CLICOLOR_FORCE", "COLORTERM"):
+            assert var not in os.environ
+
+    def test_rich_console_emits_no_ansi_to_a_plain_file(self):
+        from io import StringIO
+
+        from rich.console import Console
+
+        out = StringIO()
+        Console(file=out).print("[red]styled[/red]")
+        assert "\x1b[" not in out.getvalue()
+
+    def test_try_resume_output_is_plain_text(self, straight_cassette, monkeypatch, capsys):
+        """The exact §-hermeticity victim: try_resume's stderr must be
+        ANSI-free under capsys no matter the invoking shell's env."""
+        forbid_input(monkeypatch)
+        raw = straight_cassette()
+        save_progress_state(raw)
+
+        cli.try_resume(cassette_from(raw), None, auto=True)
+
+        err = capsys.readouterr().err
+        assert "Saved progress found: 1/3" in err
+        assert "\x1b[" not in err

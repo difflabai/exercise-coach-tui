@@ -562,12 +562,13 @@ class TestCountdownKeys:
         clock = {"t": 1_000_000.0}
         queue = list(keys)
         live = Live(console=Console(file=StringIO(), force_terminal=True, width=100, height=40))
-        return screens.timed_hold(
+        ev, _held = screens.timed_hold(
             live, cassette, 0, 0, group, ex, 0, 0,
             now=lambda: clock["t"],
             read_key=lambda: queue.pop(0) if queue else "",
             sleep=lambda s: clock.__setitem__("t", clock["t"] + s),
         )
+        return ev
 
     def test_volume_and_mute_keys_apply_during_countdown(self, timed_cassette, no_audio):
         ev = self._run_timed_hold(timed_cassette, ["-", "m"])
