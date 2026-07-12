@@ -1,12 +1,16 @@
 """TUI rendering: overview table, panels, progress bar, layout composition."""
 
+import time
+
 from rich import box
 from rich.live import Live
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from . import settings as user_settings
 from .audio import settings as audio_settings
+from .buddy import COLLAPSE_WIDTH, Mood, buddy_panel, celebrating
 from .cassette import count_sets, rounds_completed
 from .models import Cassette, ExerciseData, Group
 from .tts import CAPTION_DURATION, current_caption
@@ -229,16 +233,56 @@ def build_progress_bar(cassette: Cassette, avg_rep_set: float = 30.0) -> str:
     )
 
 
-def render_layout(live: Live, overview: Table, panel: Panel, progress_text: str) -> None:
-    """Compose and push a full screen update."""
+def render_layout(
+    live: Live, overview: Table, panel: Panel, progress_text: str,
+    *,
+    mood: Mood | None = None,
+    mood_intensity: float = 0.0,
+    now: float | None = None,
+) -> None:
+    """Compose and push a full screen update.
+
+    Screens pass their `mood` (plus `mood_intensity`/`now`) to show Rep, the
+    buddy coach, beside the active panel — the caption then renders inside
+    his speech bubble. With no mood, or the buddy disabled, the classic
+    single-column layout renders, caption row included.
+    """
+    caption, age = current_caption()
+    caption_live = bool(caption) and age < CAPTION_DURATION
+
     layout = Table.grid(expand=True)
     layout.add_row(overview)
+
+    if mood is not None and user_settings.buddy_enabled:
+        frame_time = time.time() if now is None else now
+        if celebrating(frame_time):
+            mood = Mood.CELEBRATING  # transient set/group-complete override
+        console_width = live.console.width
+        rep = buddy_panel(
+            mood, frame_time, caption if caption_live else "",
+            intensity=mood_intensity, width=console_width,
+        )
+        if console_width < COLLAPSE_WIDTH:
+            # Narrow terminal: columns are the scarce resource, so don't
+            # reserve a side column at all — the active panel keeps the full
+            # width and the collapsed one-line buddy stacks underneath it.
+            layout.add_row(panel)
+            layout.add_row(rep)
+        else:
+            row = Table.grid(expand=True)
+            row.add_column(ratio=1)
+            row.add_column(width=30)
+            row.add_row(panel, rep)
+            layout.add_row(row)
+        layout.add_row(Text.from_markup(progress_text))
+        live.update(layout)
+        return
+
     layout.add_row(panel)
     layout.add_row(Text.from_markup(progress_text))
 
     # Caption subtitle — shows what TTS just said
-    caption, age = current_caption()
-    if caption and age < CAPTION_DURATION:
+    if caption_live:
         if age < CAPTION_DURATION * 0.75:
             style = "bold italic bright_white on grey23"
         else:

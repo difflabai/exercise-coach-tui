@@ -26,8 +26,9 @@ import pytest
 from rich.console import Console
 from rich.live import Live
 
-from exercise_coach import audio, screens, state, tts
+from exercise_coach import audio, buddy, screens, state, tts
 from exercise_coach import player as player_mod
+from exercise_coach import settings as user_settings
 from exercise_coach.cassette import load_cassette_from_dict
 from exercise_coach.models import Cassette
 from exercise_coach.player import Player
@@ -67,6 +68,18 @@ def reset_audio_settings():
     yield
     audio.settings.volume = 0.7
     audio.settings.muted = False
+
+
+@pytest.fixture(autouse=True)
+def reset_buddy_state():
+    """buddy.py's celebrate-until timestamp and settings.py's buddy flag are
+    process-global mutable state — reset both around every test (mirrors
+    reset_audio_settings; the player stamps celebrate() on every set)."""
+    buddy.reset()
+    user_settings.buddy_enabled = True
+    yield
+    buddy.reset()
+    user_settings.buddy_enabled = True
 
 
 class AudioLog:
