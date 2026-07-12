@@ -9,9 +9,12 @@ one per rep set, and one to end each rest (rests happen between rounds, so
 rounds - 1 of them).
 """
 
+from conftest import FakeClock, ScriptedKeys
+
 from exercise_coach import state as state_mod
-from exercise_coach.cassette import count_sets, rounds_completed
+from exercise_coach.cassette import count_sets, load_cassette_from_dict, rounds_completed
 from exercise_coach.events import Event
+from exercise_coach.player import play_cassette
 from exercise_coach.state import apply_state, load_state_data
 
 # ---------------------------------------------------------------------------
@@ -301,6 +304,250 @@ def test_resume_from_mid_workout_state(make_player):
     assert [s.actual_reps for s in g1.exercises[0].sets] == [10, 10]
     row = h2.cassette.phases[0].groups[1].exercises[0]
     assert row.sets[0].actual_reps == 5
+
+
+def timed_group(*, name: str = "Plank", seconds: int = 3, rounds: int = 1, rest: int = 30) -> dict:
+    return {
+        "type": "straight", "rounds": rounds, "rest": rest,
+        "exercises": [{"name": name, "timed": True, "reps": seconds}],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Back-navigation boundaries
+# ---------------------------------------------------------------------------
+
+def test_previous_group_at_first_group_returns_false(make_player):
+    h = make_player(cassette(group(ex("A")), group(ex("B"))))
+
+    assert h.player.previous_group() is False
+    assert (h.player.phase_idx, h.player.group_idx) == (0, 0)  # playhead untouched
+
+
+def test_back_at_first_group_bounces_and_replays(make_player, no_audio):
+    """'b' on the very first transition must not crash or wrap to the end."""
+    cass = cassette(group(ex("Squat", 10)))
+    h = make_player(cass, keys=["b", "enter", "enter"])  # b bounces, then play
+
+    h.run()
+
+    assert h.player.is_complete()
+    squat = h.cassette.phases[0].groups[0].exercises[0]
+    assert squat.sets[0].actual_reps == 10
+    # Performed exactly once despite the bounce: one set + one round chime.
+    assert no_audio.sounds.count(b"set_complete") == 2
+
+
+def test_back_chains_through_completed_groups(make_player, no_audio):
+    """'b' from a completed-group redo screen keeps walking backwards."""
+    cass = cassette(group(ex("A")), group(ex("B")), group(ex("C")))
+    keys = (
+        keys_to_finish(1) + keys_to_finish(1)  # G1, G2
+        + ["b"]      # G3 transition -> back onto completed G2
+        + ["b"]      # G2 redo screen -> further back onto completed G1
+        + ["enter"]  # G1 redo screen -> continue (no redo)
+        + keys_to_finish(1)  # forward lands on G3, the only incomplete group
+    )
+    h = make_player(cass, keys=keys)
+
+    h.run()
+
+    assert h.player.is_complete()
+    for g in h.cassette.phases[0].groups:
+        assert all(s.actual_reps is not None for s in all_sets(g))
+        assert not g.skipped
+    # Nothing was replayed: each group chimed exactly once (set + round each).
+    assert no_audio.sounds.count(b"set_complete") == 6
+    assert no_audio.sounds.count(b"group_complete") == 3
+
+
+def test_arriving_at_complete_group_not_via_back_is_silent_done(make_player, no_audio):
+    """Landing forward on an already-complete group: no screen, no fanfare."""
+    cass = cassette(group(ex("A", 10)), group(ex("B", 5)))
+    h = make_player(cass)
+    complete_group(h.cassette.phases[0].groups[0])
+
+    assert h.play_group() is Event.DONE
+
+    assert h.keys.reads == 0  # no transition/redo screen was shown
+    assert no_audio.sounds == []  # and no completion fanfare replayed
+    assert not any("Next up" in line for line in no_audio.spoken)
+
+
+def test_run_on_fully_complete_cassette_returns_immediately(make_player, no_audio):
+    cass = cassette(group(ex("A")), group(ex("B")))
+    h = make_player(cass)
+    for g in h.cassette.phases[0].groups:
+        complete_group(g)
+
+    h.run()  # nothing left to play: no screens, no keys, no speech
+
+    assert h.keys.reads == 0
+    assert no_audio.spoken == []
+
+
+# ---------------------------------------------------------------------------
+# Skip/back during rest and timed holds
+# ---------------------------------------------------------------------------
+
+def test_skip_during_post_round_rest_saves_next_round(make_player):
+    """Skip during the rest after round r must save round_idx = r + 1."""
+    cass = cassette(group(ex("Squat", 10), rounds=2))
+    h = make_player(cass, keys=["enter", "enter", "s"])  # 's' during the rest
+
+    h.run()
+
+    g = h.cassette.phases[0].groups[0]
+    assert g.skipped
+    assert [s.actual_reps for s in g.exercises[0].sets] == [10, None]  # round 1 kept
+    assert load_state_data()["position"] == {"phase_idx": 0, "group_idx": 0, "round_idx": 1}
+    assert h.player.is_complete()
+
+
+def test_skip_during_restarted_pending_rest_saves_current_round(make_player):
+    """Skip during the pending (restarted) rest saves round_idx as-is, not +1."""
+    cass = cassette(group(ex("Squat", 10)), group(ex("Row", 5), rounds=2))
+    h = make_player(cass)
+
+    h.keys.push("enter", "enter")
+    assert h.play_group() is Event.DONE  # G1
+    assert h.player.advance_group()
+
+    h.keys.push("enter", "enter", "b")  # G2: transition, set 1, 'b' during rest
+    assert h.play_group() is Event.BACK
+    assert h.player._pending_rest == (0, 1)
+
+    assert h.player.previous_group()
+    h.keys.push("enter")
+    assert h.play_group(via_back=True) is Event.DONE  # G1 completed screen
+
+    assert h.player.advance_group()  # forward onto G2: pending rest restarts
+    h.keys.push("s")
+    assert h.play_group() is Event.DONE  # 's' during the restarted rest
+
+    g2 = h.cassette.phases[0].groups[1]
+    assert g2.skipped
+    assert g2.exercises[0].sets[0].actual_reps == 5  # round 1 progress kept
+    # round_idx is the rounds already complete (1), not 1 + 1.
+    assert load_state_data()["position"] == {"phase_idx": 0, "group_idx": 1, "round_idx": 1}
+
+
+def test_back_during_restarted_pending_rest_rearms_it(make_player):
+    """'b' out of the restarted rest must re-arm _pending_rest for next entry."""
+    cass = cassette(group(ex("Squat", 10)), group(ex("Row", 5), rounds=2))
+    h = make_player(cass)
+
+    h.keys.push("enter", "enter")
+    assert h.play_group() is Event.DONE  # G1
+    assert h.player.advance_group()
+
+    h.keys.push("enter", "enter", "b")  # G2: 'b' during the post-round rest
+    assert h.play_group() is Event.BACK
+    assert h.player._pending_rest == (0, 1)
+
+    assert h.player.previous_group()
+    h.keys.push("enter")
+    assert h.play_group(via_back=True) is Event.DONE  # G1 completed screen
+    assert h.player.advance_group()
+
+    h.keys.push("b")  # 'b' again, during the *restarted* rest
+    assert h.play_group() is Event.BACK
+    assert h.player._pending_rest == (0, 1)  # re-armed, not dropped
+
+    assert h.player.previous_group()
+    h.keys.push("enter")
+    assert h.play_group(via_back=True) is Event.DONE
+    assert h.player.advance_group()
+
+    h.keys.push("enter", "enter")  # end the (third) rest, then set 2
+    assert h.play_group() is Event.DONE
+    assert h.player._pending_rest is None
+    row = h.cassette.phases[0].groups[1].exercises[0]
+    assert [s.actual_reps for s in row.sets] == [5, 5]  # set 2 played exactly once
+
+
+def test_skip_during_timed_hold_records_nothing(make_player, no_audio):
+    cass = cassette(timed_group(seconds=30, rounds=2))
+    h = make_player(cass, keys=["enter", "s"])  # transition, then 's' mid-hold
+
+    h.run()
+
+    g = h.cassette.phases[0].groups[0]
+    assert g.skipped
+    assert all(s.actual_reps is None for s in all_sets(g))  # hold not credited
+    assert "Skipping Plank" in no_audio.spoken
+    assert load_state_data()["position"] == {"phase_idx": 0, "group_idx": 0, "round_idx": 0}
+    assert h.player.is_complete()
+
+
+def test_back_during_timed_hold_restarts_it_on_return(make_player, no_audio):
+    cass = cassette(group(ex("Squat", 10)), timed_group(seconds=3))
+    keys = (
+        keys_to_finish(1)       # G1
+        + ["enter", "b"]        # G2: transition, 'b' mid-hold (not credited)
+        + ["enter"]             # G1 completed screen: continue
+        + ["enter"]             # G2 transition again; hold then elapses
+    )
+    h = make_player(cass, keys=keys)
+
+    h.run()
+
+    assert h.player.is_complete()
+    plank = h.cassette.phases[0].groups[1].exercises[0]
+    assert plank.sets[0].actual_reps == 3  # credited only by the full re-run
+    # The get-in-position countdown ran twice: once before 'b', once after.
+    assert no_audio.spoken.count("Get in position") == 2
+    assert no_audio.spoken.count("Done") == 1
+
+
+# ---------------------------------------------------------------------------
+# play_cassette() top level
+# ---------------------------------------------------------------------------
+
+def test_play_cassette_full_run_logs_and_clears_state(no_audio, capsys):
+    raw = cassette(group(ex("Squat", 10)), title="Full Run")
+    raw["voice"] = {"session_intro": "Welcome.", "session_complete": "All done."}
+    raw["context_exercises"] = [
+        {"name": "Dead Hangs", "note": "Any time today.", "voice": "Hang around."},
+    ]
+    cass = load_cassette_from_dict(raw)
+    clock = FakeClock()
+    keys = ScriptedKeys(["enter", "enter", "enter"])  # context, transition, set
+
+    play_cassette(cass, now=clock.now, read_key=keys, sleep=clock.sleep)
+
+    # Session intro, context voice, session complete — in order.
+    spoken = no_audio.spoken
+    assert spoken.index("Welcome.") < spoken.index("Hang around.") < spoken.index("All done.")
+    assert "Workout complete!" in capsys.readouterr().out
+    # The log was written once and includes context + exercise lines...
+    log = state_mod.LOG_FILE.read_text()
+    assert log.count("--- Full Run") == 1
+    assert "Dead Hangs" in log
+    assert "Squat" in log
+    # ...and the state file (written at the round boundary) was cleared, so a
+    # re-run cannot resume-and-relog this workout.
+    assert not state_mod.STATE_FILE.exists()
+
+
+def test_play_cassette_already_complete_short_circuits(no_audio, capsys):
+    """A finished cassette prints the log, saves it once, and clears state
+    without ever starting playback (no TTY, no screens)."""
+    cass = load_cassette_from_dict(cassette(group(ex("Squat", 10)), title="Done Run"))
+    complete_group(cass.phases[0].groups[0])
+    state_mod.save_state(cass, {"phase_idx": 0, "group_idx": 0, "round_idx": 1})
+
+    def no_key():
+        raise AssertionError("read_key must not be called on the short-circuit path")
+
+    play_cassette(cass, read_key=no_key)
+
+    assert "already complete" in capsys.readouterr().out
+    log = state_mod.LOG_FILE.read_text()
+    assert log.count("--- Done Run") == 1
+    assert "Squat" in log
+    assert not state_mod.STATE_FILE.exists()  # re-runs won't append more entries
+    assert no_audio.spoken == []  # no session intro/complete voice either
 
 
 # ---------------------------------------------------------------------------
