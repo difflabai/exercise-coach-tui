@@ -20,6 +20,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from .audio import play_sound, sound_rest_done
+from .audio import settings as audio_settings
 from .events import Event
 from .models import Cassette, ExerciseData, Group, TimedCue
 from .term import (
@@ -118,6 +119,19 @@ def run_screen(
                 if real_input:
                     enter_cbreak()
                     drain_stdin()
+                continue
+            # Global volume keys, available on every screen. A screen-specific
+            # mapping always wins (keymap is checked first, above), and these
+            # never count as activity: no timer state is touched — the loop
+            # just re-renders with the new footer level.
+            if key == "-":
+                audio_settings.step_down()
+                continue
+            if key in ("+", "="):  # '=' is unshifted '+' on most layouts
+                audio_settings.step_up()
+                continue
+            if key == "m":
+                audio_settings.toggle_mute()
                 continue
             if key and char_handler is not None:
                 char_handler(key)
@@ -396,7 +410,7 @@ def rep_set_screen(
     """Wait for the user to finish a rep-based set.
     Returns (event, total seconds spent paused) so the caller can measure
     active set duration. Event is DONE, FAIL, SKIP, or BACK."""
-    key_hint = "Enter = done  •  f = failed  •  s = skip  •  b = back  •  p = pause"
+    key_hint = "Enter = done  •  f = failed  •  s = skip  •  b = back  •  p = pause  •  m/-/+ vol"
     paused = {"secs": 0.0}
 
     def render() -> None:

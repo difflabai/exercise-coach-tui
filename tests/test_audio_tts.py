@@ -151,7 +151,12 @@ class TestToneGeneration:
 @pytest.fixture
 def sound_env(no_audio, monkeypatch, tmp_path):
     """Wire the real play_sound to fakes: recorded Popen (afplay 'missing',
-    aplay 'present'), a tempdir under tmp_path, and fresh module caches."""
+    aplay 'present'), a tempdir under tmp_path, and fresh module caches.
+
+    Volume is pinned to 1.0 so play-time PCM scaling is the identity and the
+    written WAV equals the generated tone byte-for-byte (scaling behavior is
+    covered in test_volume.py)."""
+    audio.settings.volume = 1.0
     spawned: list[FakePopen] = []
     monkeypatch.setattr(audio, "subprocess", make_subprocess_stub(spawned, fail=("afplay",)))
     sound_dir = tmp_path / "sounds"
@@ -275,31 +280,35 @@ class TestBackendSelection:
         assert "16000" in aplay.cmd
         assert tts._say_procs == spawned
 
+    # Fallback commands carry the master volume (default 0.7): `say` gets
+    # inline [[volm]] markup, espeak-ng/espeak get -a 0..200 (0.7 -> 140).
+    # The mapping itself is covered in test_volume.py.
+
     def test_piper_without_aplay_falls_back(self, tts_env):
         spawned = tts_env("piper", "say")  # aplay missing -> piper chain unusable
         REAL_START_SAY("hi")
-        assert [p.cmd for p in spawned] == [["say", "hi"]]
+        assert [p.cmd for p in spawned] == [["say", "[[volm 0.70]] hi"]]
 
     def test_piper_without_model_falls_back(self, tts_env):
         spawned = tts_env("piper", "aplay", "espeak-ng")  # binaries yes, model no
         REAL_START_SAY("hi")
-        assert [p.cmd for p in spawned] == [["espeak-ng", "hi"]]
+        assert [p.cmd for p in spawned] == [["espeak-ng", "-a", "140", "hi"]]
 
     def test_say_only(self, tts_env):
         spawned = tts_env("say")
         REAL_START_SAY("hi")
-        assert [p.cmd for p in spawned] == [["say", "hi"]]
+        assert [p.cmd for p in spawned] == [["say", "[[volm 0.70]] hi"]]
         assert tts._say_procs == spawned
 
     def test_espeak_ng_fallback(self, tts_env):
         spawned = tts_env("espeak-ng", "espeak")
         REAL_START_SAY("hi")
-        assert [p.cmd for p in spawned] == [["espeak-ng", "hi"]]
+        assert [p.cmd for p in spawned] == [["espeak-ng", "-a", "140", "hi"]]
 
     def test_plain_espeak_is_last_resort(self, tts_env):
         spawned = tts_env("espeak")
         REAL_START_SAY("hi")
-        assert [p.cmd for p in spawned] == [["espeak", "hi"]]
+        assert [p.cmd for p in spawned] == [["espeak", "-a", "140", "hi"]]
 
     def test_no_backend_is_a_silent_noop(self, tts_env):
         spawned = tts_env()  # nothing installed

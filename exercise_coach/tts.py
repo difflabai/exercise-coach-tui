@@ -4,7 +4,11 @@ import json
 import os
 import shutil
 import subprocess
+import threading
 import time
+
+from .audio import scale_pcm
+from .audio import settings as audio_settings
 
 CAPTION_DURATION = 12.0  # seconds to show caption
 
@@ -48,14 +52,46 @@ def _piper_sample_rate(model: str) -> int:
         return 22050
 
 
+def _pump_scaled(src, dst, factor: float) -> None:
+    """Copy raw S16LE PCM from `src` to `dst`, scaling amplitude by `factor`.
+
+    Runs in a daemon thread between piper stdout and aplay stdin so speech
+    stays non-blocking. Keeps sample alignment across chunk boundaries with
+    a one-byte carry. Closes both ends when done."""
+    carry = b""
+    try:
+        while True:
+            chunk = src.read(4096)
+            if not chunk:
+                break
+            chunk = carry + chunk
+            if len(chunk) % 2:
+                carry, chunk = chunk[-1:], chunk[:-1]
+            else:
+                carry = b""
+            dst.write(scale_pcm(chunk, factor))
+    except (OSError, ValueError):
+        pass  # aplay went away mid-utterance (terminate_say) — just stop
+    finally:
+        for f in (src, dst):
+            try:
+                f.close()
+            except (OSError, ValueError):
+                pass
+
+
 def _start_piper(text: str) -> list[subprocess.Popen] | None:
-    """Synthesize via piper and play via aplay. Returns the proc chain, or None if unavailable."""
+    """Synthesize via piper and play via aplay. Returns the proc chain, or None if unavailable.
+
+    At full volume piper pipes straight into aplay; below it, a small pump
+    thread scales the raw S16LE stream in between."""
     if not (shutil.which("piper") and shutil.which("aplay")):
         return None
     model = _piper_model()
     if not model:
         return None
     rate = _piper_sample_rate(model)
+    vol = audio_settings.effective()
     try:
         piper = subprocess.Popen(
             ["piper", "--model", model, "--output_raw"],
@@ -66,27 +102,44 @@ def _start_piper(text: str) -> list[subprocess.Popen] | None:
         if piper.stdin is not None:
             piper.stdin.write(text.encode())
             piper.stdin.close()
-        aplay = subprocess.Popen(
-            ["aplay", "-q", "-r", str(rate), "-f", "S16_LE", "-c", "1", "-t", "raw", "-"],
-            stdin=piper.stdout,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        if piper.stdout is not None:
-            piper.stdout.close()
+        aplay_cmd = ["aplay", "-q", "-r", str(rate), "-f", "S16_LE", "-c", "1", "-t", "raw", "-"]
+        if vol >= 1.0:
+            aplay = subprocess.Popen(
+                aplay_cmd,
+                stdin=piper.stdout,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            if piper.stdout is not None:
+                piper.stdout.close()
+        else:
+            aplay = subprocess.Popen(
+                aplay_cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            threading.Thread(
+                target=_pump_scaled, args=(piper.stdout, aplay.stdin, vol), daemon=True,
+            ).start()
         return [piper, aplay]
     except OSError:
         return None
 
 
 def _tts_fallback_cmd(text: str) -> list[str]:
-    """Single-command TTS fallback when piper isn't available."""
+    """Single-command TTS fallback when piper isn't available.
+
+    Volume mapping per backend: macOS `say` gets inline `[[volm N]]` markup
+    (0.0-1.0), espeak-ng/espeak get `-a` amplitude (0-200)."""
+    vol = audio_settings.effective()
     if shutil.which("say"):
-        return ["say", text]
+        return ["say", f"[[volm {vol:.2f}]] {text}"]
+    amp = str(int(round(vol * 200)))
     if shutil.which("espeak-ng"):
-        return ["espeak-ng", text]
+        return ["espeak-ng", "-a", amp, text]
     if shutil.which("espeak"):
-        return ["espeak", text]
+        return ["espeak", "-a", amp, text]
     return []
 
 
@@ -147,14 +200,21 @@ def _start_say(text: str) -> None:
 
 
 def say(text: str) -> None:
-    """Non-blocking speech."""
+    """Non-blocking speech. Muted/zero volume: the caption still fires
+    (it is the no-audio channel), only the speech is skipped."""
     _set_caption(text)
+    if audio_settings.effective() <= 0.0:
+        return
     _start_say(text)
 
 
 def say_sync(text: str, wait: float = 0) -> None:
-    """Blocking speech."""
+    """Blocking speech. Caption fires even when muted (see `say`)."""
     _set_caption(text)
+    if audio_settings.effective() <= 0.0:
+        if wait > 0:
+            time.sleep(wait)
+        return
     _start_say(text)
     if _say_procs:
         try:
