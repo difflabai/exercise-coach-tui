@@ -1,5 +1,6 @@
 """Text-to-speech: piper/say/espeak backends, process lifecycle, and captions."""
 
+import atexit
 import json
 import os
 import shutil
@@ -96,21 +97,38 @@ def _set_caption(text: str) -> None:
     _caption_time = time.time()
 
 
-def terminate_say() -> None:
+def _reap() -> None:
+    """Drop finished procs from the live list, reaping their exit status."""
     global _say_procs
+    _say_procs = [p for p in _say_procs if p.poll() is None]
+
+
+def terminate_say() -> None:
+    """Terminate any in-flight speech and reap the processes (no zombies)."""
+    global _say_procs
+    _reap()
     for p in _say_procs:
         try:
-            if p.poll() is None:
-                p.terminate()
+            p.terminate()
+            p.wait(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            try:
+                p.kill()
+                p.wait(timeout=0.5)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
         except OSError:
             pass
     _say_procs = []
 
 
+atexit.register(terminate_say)
+
+
 def _start_say(text: str) -> None:
     """Kick off TTS for `text`. Tries piper first, then a single-command fallback."""
     global _say_procs
-    terminate_say()
+    terminate_say()  # reaps finished procs, then stops any still speaking
     procs = _start_piper(text)
     if procs is None:
         cmd = _tts_fallback_cmd(text)

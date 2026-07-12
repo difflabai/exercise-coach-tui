@@ -42,7 +42,10 @@ Plank 3x40s | BW
 ### Options
 
 ```
---rest N    Rest seconds between sets (default: 75)
+--rest N    Rest seconds between sets. Text workouts default to 75; JSON
+            cassettes keep their own rest values unless --rest is passed
+            explicitly (an explicit --rest 75 also overrides).
+--resume    Resume the last workout without prompting
 --reset     Discard saved progress and exit
 --log       Print current saved progress and exit
 ```
@@ -50,6 +53,10 @@ Plank 3x40s | BW
 ### Resume
 
 Progress auto-saves on every completed set and on Ctrl-C. Re-run the same workout to pick up where you left off.
+
+### Data files
+
+Saved progress (`.workout_state.json`) and the session log (`workout_log.txt`) live in `~/.local/share/exercise-coach/` (or `$XDG_DATA_HOME/exercise-coach/` if set). Files from older versions that sat next to `coach.py` are moved there automatically on first run.
 
 ## Voice
 

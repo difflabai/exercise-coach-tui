@@ -1,7 +1,35 @@
 """Sound effects: tone generation and playback."""
 
+import atexit
 import functools
+import hashlib
+import os
+import shutil
 import subprocess
+import tempfile
+
+_sound_dir: str | None = None
+_sound_files: dict[str, str] = {}
+
+
+def _sound_path(sound_data: bytes) -> str:
+    """Return the path of a temp WAV for `sound_data`, writing it once per session.
+
+    Files live in a per-session tempdir that is removed at interpreter exit,
+    so playback never leaks orphaned WAVs.
+    """
+    global _sound_dir
+    if _sound_dir is None:
+        _sound_dir = tempfile.mkdtemp(prefix="exercise-coach-")
+        atexit.register(shutil.rmtree, _sound_dir, ignore_errors=True)
+    key = hashlib.sha256(sound_data).hexdigest()[:16]
+    path = _sound_files.get(key)
+    if path is None or not os.path.exists(path):
+        path = os.path.join(_sound_dir, f"{key}.wav")
+        with open(path, "wb") as f:
+            f.write(sound_data)
+        _sound_files[key] = path
+    return path
 
 
 def _generate_tone(frequency: int, duration_ms: int, volume: float = 0.5) -> bytes:
@@ -76,13 +104,10 @@ def sound_rest_done() -> bytes:
 
 
 def play_sound(sound_data: bytes) -> None:
-    """Play a WAV sound from bytes (non-blocking)."""
-    import tempfile
+    """Play a WAV sound from bytes (non-blocking). Temp files are cached per tone."""
     try:
-        tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-        tmp.write(sound_data)
-        tmp.close()
-        for cmd in (["afplay", tmp.name], ["aplay", "-q", tmp.name]):
+        path = _sound_path(sound_data)
+        for cmd in (["afplay", path], ["aplay", "-q", path]):
             try:
                 subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 return

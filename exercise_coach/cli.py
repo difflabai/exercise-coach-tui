@@ -22,6 +22,7 @@ from .state import (
     apply_state,
     clear_state,
     load_state_data,
+    migrate_legacy_files,
     print_log,
     render_log,
     save_log,
@@ -84,6 +85,9 @@ def try_resume(cassette: Cassette, cassette_path: str | None, auto: bool = False
         answer = input().strip().lower()
     except EOFError:
         answer = "y"
+    except KeyboardInterrupt:
+        console.print("\nAborted.")
+        sys.exit(130)
 
     if answer in ("", "y", "yes"):
         console.print("[green]Resuming...[/green]")
@@ -100,11 +104,20 @@ def try_resume(cassette: Cassette, cassette_path: str | None, auto: bool = False
 def main() -> None:
     parser = argparse.ArgumentParser(description="Workout Coach TUI")
     parser.add_argument("file", nargs="?", help="Workout file (.json cassette or .txt)")
-    parser.add_argument("--rest", type=int, default=75, help="Rest seconds (default: 75, overrides cassette default)")
+    parser.add_argument(
+        "--rest", type=int, default=None, metavar="N",
+        help="Rest seconds. Text input defaults to 75; JSON cassettes keep their own "
+             "rest unless this flag is passed explicitly (even --rest 75 overrides).",
+    )
     parser.add_argument("--resume", action="store_true", help="Resume last workout without prompting")
     parser.add_argument("--reset", "--restart", action="store_true", help="Discard saved state and exit")
     parser.add_argument("--log", action="store_true", help="Print current saved log and exit")
     args = parser.parse_args()
+
+    migrate_legacy_files()
+
+    # args.rest is None unless --rest was passed; text input falls back to 75.
+    rest = args.rest if args.rest is not None else 75
 
     if args.reset:
         clear_state()
@@ -128,7 +141,7 @@ def main() -> None:
             else:
                 print("No saved cassette for log.", file=sys.stderr)
                 sys.exit(1)
-        cassette, _ = parse_input(text, args.rest)
+        cassette, _ = parse_input(text, rest)
         apply_state(cassette, state)
         print(render_log(cassette))
         return
@@ -143,15 +156,15 @@ def main() -> None:
         # Load cassette: from file arg, saved path, or embedded source
         if args.file:
             cassette_path = args.file
-            cassette, _ = parse_input(Path(args.file).read_text(), args.rest)
+            cassette, _ = parse_input(Path(args.file).read_text(), rest)
         else:
             saved_path = state.get("cassette_path", "")
             source = state.get("cassette_source", "")
             if saved_path and Path(saved_path).exists():
                 cassette_path = saved_path
-                cassette, _ = parse_input(Path(saved_path).read_text(), args.rest)
+                cassette, _ = parse_input(Path(saved_path).read_text(), rest)
             elif source:
-                cassette, _ = parse_input(source, args.rest)
+                cassette, _ = parse_input(source, rest)
             else:
                 print("No saved cassette to resume from.", file=sys.stderr)
                 sys.exit(1)
@@ -167,10 +180,10 @@ def main() -> None:
                 tmp_cassette = None
                 tmp_path = None
                 if saved_path and Path(saved_path).exists():
-                    tmp_cassette, _ = parse_input(Path(saved_path).read_text(), args.rest)
+                    tmp_cassette, _ = parse_input(Path(saved_path).read_text(), rest)
                     tmp_path = saved_path
                 elif source:
-                    tmp_cassette, _ = parse_input(source, args.rest)
+                    tmp_cassette, _ = parse_input(source, rest)
                 if tmp_cassette:
                     resumed = try_resume(tmp_cassette, tmp_path)
                     if resumed is not None:
@@ -180,7 +193,7 @@ def main() -> None:
 
         if not resumed_from_state:
             text = read_input(args.file)
-            cassette, is_json = parse_input(text, args.rest)
+            cassette, is_json = parse_input(text, rest)
 
             if not cassette.phases or not any(g for p in cassette.phases for g in p.groups):
                 print("No exercises parsed. Check your input format.", file=sys.stderr)
@@ -189,12 +202,13 @@ def main() -> None:
             if args.file:
                 cassette_path = args.file
 
-            # Apply --rest override: always for text input, only when explicitly set for JSON
-            rest_override = not is_json or args.rest != 75
-            if rest_override:
+            # Apply --rest override to JSON cassettes only when the flag was
+            # explicitly passed (including --rest 75). Text input already got
+            # `rest` via text_to_cassette but the loop keeps it uniform.
+            if not is_json or args.rest is not None:
                 for phase in cassette.phases:
                     for group in phase.groups:
-                        group.rest = args.rest
+                        group.rest = rest
 
             # Try resume (when file was explicitly provided)
             try_resume(cassette, cassette_path)
