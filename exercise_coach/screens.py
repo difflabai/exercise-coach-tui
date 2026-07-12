@@ -68,6 +68,7 @@ def run_screen(
     char_handler: Callable[[str], None] | None = None,
     poll: float = 0.25,
     sleep: Callable[[float], None] = time.sleep,
+    suspendable: bool = True,
 ) -> Event:
     """Run one interactive screen until a mapped key (or tick) yields an Event.
 
@@ -78,7 +79,8 @@ def run_screen(
     - `pause` (if given) is invoked on 'p' with the terminal restored; it is
       expected to show the pause overlay and compensate the screen's timers.
     - `char_handler` receives unmapped non-empty keys (digit input etc.).
-    - Ctrl-Z raises WorkoutPaused.
+    - Ctrl-Z raises WorkoutPaused, unless `suspendable=False` (screens with
+      pending unsaved input, like the failure-reps prompt, ignore it).
 
     When a custom `read_key` is injected (tests), the real terminal is left
     untouched: no cbreak, no stdin draining.
@@ -103,7 +105,10 @@ def run_screen(
                     drain_stdin()
                 return keymap[key]
             if key == "ctrl-z":
-                raise WorkoutPaused()
+                if suspendable:
+                    raise WorkoutPaused()
+                sleep(poll)
+                continue
             if key == "p" and pause is not None:
                 if real_input:
                     restore_terminal()
@@ -177,12 +182,17 @@ def transition_screen(
     live: Live, cassette: Cassette, cur_phase: int, cur_group: int,
     group: Group, avg_rep_set: float = 30.0,
     *,
+    completed: bool = False,
     now: Callable[[], float] = time.time,
     read_key: Callable[[], str] | None = None,
     sleep: Callable[[float], None] = time.sleep,
 ) -> Event:
     """Show a setup/transition screen between groups. Blocks until Enter.
-    Returns DONE, SKIP, or BACK."""
+    Returns DONE, SKIP, or BACK.
+
+    With `completed=True` (reached via 'b' onto an already-finished group)
+    it instead offers an explicit redo: Enter/s = move on (DONE),
+    r = REDO (the caller clears the group's progress), b = further BACK."""
     exercises_desc = []
     for ex in group.exercises:
         line = f"[bold]{ex.name}[/bold]"
@@ -190,28 +200,40 @@ def transition_screen(
             line += f"  ({ex.load})"
         exercises_desc.append(line)
 
-    content = "[bold cyan]Next up:[/bold cyan]\n" + "\n".join(exercises_desc)
-    if group.setup:
-        content += f"\n\n[yellow]{group.setup}[/yellow]"
-    content += "\n\n[dim]Enter = ready  •  s = skip  •  b = back[/dim]"
+    if completed:
+        content = "[bold green]Already completed:[/bold green]\n" + "\n".join(exercises_desc)
+        content += (
+            "\n\n[dim]Enter = continue  •  r = redo (clears this group's progress)"
+            "  •  b = back[/dim]"
+        )
+        keymap = {"enter": Event.DONE, "s": Event.DONE, "r": Event.REDO, "b": Event.BACK}
+        title = "Group complete"
+        border = "green"
+    else:
+        content = "[bold cyan]Next up:[/bold cyan]\n" + "\n".join(exercises_desc)
+        if group.setup:
+            content += f"\n\n[yellow]{group.setup}[/yellow]"
+        content += "\n\n[dim]Enter = ready  •  s = skip  •  b = back[/dim]"
+        keymap = {"enter": Event.DONE, "s": Event.SKIP, "b": Event.BACK}
+        title = "Setup"
+        border = "cyan"
 
-    # Voice the transition
-    names = [ex.name for ex in group.exercises]
-    voice_line = "Next up: " + " and ".join(names)
-    if group.exercises and group.exercises[0].load:
-        voice_line += f", {group.exercises[0].load}"
-    say(voice_line)
+        # Voice the transition
+        names = [ex.name for ex in group.exercises]
+        voice_line = "Next up: " + " and ".join(names)
+        if group.exercises and group.exercises[0].load:
+            voice_line += f", {group.exercises[0].load}"
+        say(voice_line)
 
     def render() -> None:
         overview = build_overview(cassette, cur_phase, cur_group)
         panel = Panel(
-            content, title="Setup", border_style="cyan", expand=True, padding=(1, 4),
+            content, title=title, border_style=border, expand=True, padding=(1, 4),
         )
         render_layout(live, overview, panel, build_progress_bar(cassette, avg_rep_set))
 
     return run_screen(
-        live, render,
-        {"enter": Event.DONE, "s": Event.SKIP, "b": Event.BACK},
+        live, render, keymap,
         now=now, read_key=read_key, sleep=sleep,
         pause=_make_pause(live, cassette, cur_phase, cur_group, avg_rep_set,
                           now, read_key, sleep),
@@ -427,10 +449,13 @@ def get_failure_reps(
         elif key == "\x7f" and state["digits"]:  # backspace
             state["digits"] = state["digits"][:-1]
 
+    # suspendable=False: Ctrl-Z would discard the typed rep count (it is only
+    # written back by the player after this returns), so ignore it here —
+    # matching the original app's behavior on this screen.
     run_screen(
         live, render, {"enter": Event.DONE},
         now=now, read_key=read_key, sleep=sleep,
-        char_handler=on_char, poll=0.1,
+        char_handler=on_char, poll=0.1, suspendable=False,
     )
 
     actual = int(state["digits"]) if state["digits"] else 0

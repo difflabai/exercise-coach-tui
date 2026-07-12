@@ -7,9 +7,26 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 
 _sound_dir: str | None = None
 _sound_files: dict[str, str] = {}
+_players: list[subprocess.Popen] = []
+
+
+def _cleanup_sounds() -> None:
+    """Remove the per-session tempdir, but only after giving any in-flight
+    player a moment to finish — otherwise the rmtree could delete a WAV out
+    from under a just-spawned aplay/afplay (silencing the final chime)."""
+    deadline = time.time() + 3.0
+    for p in _players:
+        if p.poll() is None:
+            try:
+                p.wait(timeout=max(0.0, deadline - time.time()))
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+    if _sound_dir is not None:
+        shutil.rmtree(_sound_dir, ignore_errors=True)
 
 
 def _sound_path(sound_data: bytes) -> str:
@@ -21,7 +38,7 @@ def _sound_path(sound_data: bytes) -> str:
     global _sound_dir
     if _sound_dir is None:
         _sound_dir = tempfile.mkdtemp(prefix="exercise-coach-")
-        atexit.register(shutil.rmtree, _sound_dir, ignore_errors=True)
+        atexit.register(_cleanup_sounds)
     key = hashlib.sha256(sound_data).hexdigest()[:16]
     path = _sound_files.get(key)
     if path is None or not os.path.exists(path):
@@ -109,7 +126,9 @@ def play_sound(sound_data: bytes) -> None:
         path = _sound_path(sound_data)
         for cmd in (["afplay", path], ["aplay", "-q", path]):
             try:
-                subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                _players[:] = [p for p in _players if p.poll() is None]  # reap finished
+                _players.append(proc)
                 return
             except FileNotFoundError:
                 continue

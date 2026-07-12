@@ -1,6 +1,5 @@
 """Text-to-speech: piper/say/espeak backends, process lifecycle, and captions."""
 
-import atexit
 import json
 import os
 import shutil
@@ -122,7 +121,11 @@ def terminate_say() -> None:
     _say_procs = []
 
 
-atexit.register(terminate_say)
+# NOTE: deliberately no atexit hook here. On a normal exit the last utterance
+# (e.g. the session-complete line) should keep playing detached, exactly like
+# the original single-file app; init reaps the orphaned processes. The paths
+# that must silence speech (Ctrl-C, suspend, pause) call terminate_say()
+# explicitly.
 
 
 def _start_say(text: str) -> None:

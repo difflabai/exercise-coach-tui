@@ -3,6 +3,7 @@
 import json
 import os
 import shutil
+import sys
 import time
 from pathlib import Path
 
@@ -29,12 +30,20 @@ def migrate_legacy_files() -> None:
     """One-time migration: move state/log from the old repo-root location.
 
     Only moves a file when it exists in the old spot and the new one doesn't.
+    Best-effort: a failed move (permissions, read-only dir, ...) must never
+    brick the CLI — warn and carry on with the legacy file left in place.
     """
     for new_path in (STATE_FILE, LOG_FILE):
         old_path = _LEGACY_DIR / new_path.name
-        if old_path.exists() and not new_path.exists():
-            DATA_DIR.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(old_path), str(new_path))  # works across filesystems
+        try:
+            if old_path.exists() and not new_path.exists():
+                DATA_DIR.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(old_path), str(new_path))  # works across filesystems
+        except OSError as e:
+            print(
+                f"Warning: could not migrate {old_path.name} to {new_path}: {e}",
+                file=sys.stderr,
+            )
 
 
 # ---------------------------------------------------------------------------

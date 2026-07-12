@@ -86,6 +86,12 @@ class Player:
 
         self.rep_set_durations: list[float] = []
 
+        # Set when 'b' interrupts a rest period: (phase_idx, group_idx) of the
+        # group whose rest was cut short. Re-entering that group mid-round
+        # restarts the rest instead of dropping the user straight into the
+        # next set.
+        self._pending_rest: tuple[int, int] | None = None
+
     # -- playhead queries ---------------------------------------------------
 
     def current_group(self) -> Group:
@@ -180,27 +186,58 @@ class Player:
         if not group.exercises:
             return Event.DONE
 
-        if self.round_idx >= group.rounds:
-            # Already complete on arrival (e.g. 'b' onto a finished group):
-            # nothing to play, and no completion fanfare either.
-            return Event.DONE
-
         if via_back:
             # Landing on a skipped group via back makes it playable again
             # (progress itself is never touched).
             group.skipped = False
-        else:
-            if self.round_idx == 0:
+            if self.round_idx >= group.rounds:
+                # 'b' onto a finished group: offer an explicit redo — the one
+                # deliberately destructive action (recommendations §3).
                 ev = transition_screen(
                     live, self.cassette, pi, gi, group, self.avg_rep_set(),
+                    completed=True,
                     now=self.now, read_key=self.read_key, sleep=self.sleep,
                 )
                 if ev is Event.BACK:
                     return Event.BACK
-                if ev is Event.SKIP:
-                    group.skipped = True
+                if ev is not Event.REDO:
                     return Event.DONE
+                clear_group_progress(group)
+                self.round_idx = 0
+                speak(group.voice_intro)
+        elif self.round_idx >= group.rounds:
+            # Already complete on arrival: nothing to play, no fanfare.
+            return Event.DONE
+        elif self.round_idx == 0:
+            ev = transition_screen(
+                live, self.cassette, pi, gi, group, self.avg_rep_set(),
+                now=self.now, read_key=self.read_key, sleep=self.sleep,
+            )
+            if ev is Event.BACK:
+                return Event.BACK
+            if ev is Event.SKIP:
+                group.skipped = True
+                return Event.DONE
             speak(group.voice_intro)
+        # Note: the intro is only spoken at round 0 — re-entering a group
+        # mid-round (e.g. after 'b' bounced off the first group) must not
+        # repeat it.
+
+        # If 'b' interrupted this group's rest period, restart the rest now
+        # instead of dropping the user straight into the next set.
+        if self._pending_rest == (pi, gi) and 0 < self.round_idx < group.rounds:
+            self._pending_rest = None
+            ev = rest_timer(
+                live, self.cassette, pi, gi, group.rest, self.avg_rep_set(),
+                now=self.now, read_key=self.read_key, sleep=self.sleep,
+            )
+            if ev is Event.SKIP:
+                return self._skip_group(group, self.round_idx)
+            if ev is Event.BACK:
+                self._pending_rest = (pi, gi)
+                return Event.BACK
+        else:
+            self._pending_rest = None
 
         while self.round_idx < group.rounds:
             r = self.round_idx
@@ -267,6 +304,10 @@ class Player:
                     if ev is Event.SKIP:
                         return self._skip_group(group, r + 1)
                     if ev is Event.BACK:
+                        # Remember the interrupted rest so re-entering this
+                        # group restarts it rather than skipping straight to
+                        # the next set.
+                        self._pending_rest = (pi, gi)
                         return Event.BACK
 
         # Group complete
@@ -307,6 +348,7 @@ def play_cassette(
         console.print("[green]All exercises already complete![/green]")
         print_log(cassette)
         save_log(cassette)
+        clear_state()  # otherwise every re-run would append another log entry
         return
 
     player = Player(cassette, cassette_path, now=now, read_key=read_key, sleep=sleep)

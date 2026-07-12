@@ -53,8 +53,7 @@ def try_resume(cassette: Cassette, cassette_path: str | None, auto: bool = False
         saved_hash = state.get("cassette_hash", "")
         current_hash = cassette_content_hash(cassette_path)
         if saved_hash and saved_hash != current_hash:
-            if not auto:
-                console.print("[yellow]Saved state doesn't match this cassette, starting fresh.[/yellow]")
+            console.print("[yellow]Saved state doesn't match this cassette, starting fresh.[/yellow]")
             clear_state()
             return None
 
@@ -168,7 +167,12 @@ def main() -> None:
             else:
                 print("No saved cassette to resume from.", file=sys.stderr)
                 sys.exit(1)
-        position = apply_state(cassette, state)
+        # Go through try_resume so --resume gets the same safety checks as
+        # the interactive prompt: cassette-hash mismatch and already-complete
+        # states clear the stale state and start fresh instead of stamping
+        # one cassette's progress onto another or re-logging forever.
+        if try_resume(cassette, cassette_path, auto=True) is None:
+            print("Nothing to resume; starting fresh.", file=sys.stderr)
     else:
         resumed_from_state = False
         # If no file given, check saved state to offer resume

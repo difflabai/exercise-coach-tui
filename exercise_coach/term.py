@@ -21,6 +21,15 @@ def enter_cbreak() -> None:
         fd = sys.stdin.fileno()
         _old_term = termios.tcgetattr(fd)
         tty.setcbreak(fd)
+        # setcbreak leaves ISIG enabled, so without this the kernel consumes
+        # Ctrl-Z as SUSP and stops the process dead — read_key would never see
+        # byte 0x1a and the graceful save-and-suspend path could never run.
+        # Disable just the SUSP character (0 = _POSIX_VDISABLE on Linux/macOS)
+        # so Ctrl-Z becomes a readable key while Ctrl-C keeps raising
+        # KeyboardInterrupt via ISIG.
+        mode = termios.tcgetattr(fd)
+        mode[6][termios.VSUSP] = b"\x00"
+        termios.tcsetattr(fd, termios.TCSADRAIN, mode)
     except (termios.error, ValueError, OSError):
         pass
 

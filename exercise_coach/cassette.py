@@ -7,6 +7,7 @@ kept for text-input backward compatibility.
 import hashlib
 import json
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -101,13 +102,21 @@ def load_cassette_from_dict(data: dict) -> Cassette:
         for g in phase_data.get("groups", []):
             rest = g.get("rest") or rest_default
 
+            rounds = g.get("rounds", 1)
             exercises = []
             for ex in g["exercises"]:
                 sets = [SetData(reps=s["reps"]) for s in ex.get("sets", [])]
                 # If sets not specified, generate from rounds
                 if not sets:
                     default_reps = ex.get("reps", 0)
-                    sets = [SetData(reps=default_reps) for _ in range(g.get("rounds", 1))]
+                    sets = [SetData(reps=default_reps) for _ in range(rounds)]
+                elif len(sets) < rounds:
+                    # An explicit sets list shorter than the group's rounds
+                    # would crash playback with an IndexError mid-workout;
+                    # pad by repeating the last set's target.
+                    sets.extend(
+                        SetData(reps=sets[-1].reps) for _ in range(rounds - len(sets))
+                    )
                 exercises.append(ExerciseData(
                     name=ex["name"], load=ex.get("load", ""),
                     timed=ex.get("timed", False), sets=sets,
@@ -233,6 +242,9 @@ def read_input(file_path: str | None) -> str:
             line = input()
         except EOFError:
             break
+        except KeyboardInterrupt:
+            console.print("\nAborted.")
+            sys.exit(130)
         if line.strip() == "" and lines:
             break
         lines.append(line)
