@@ -57,6 +57,18 @@ def isolated_state(monkeypatch, tmp_path):
     return data_dir
 
 
+@pytest.fixture(autouse=True)
+def reset_audio_settings():
+    """The volume/mute singleton is process-global mutable state — reset it to
+    defaults around every test so one test's key presses can't leak into the
+    next. (Persistence writes land in the isolated_state tmp dir.)"""
+    audio.settings.volume = 0.7
+    audio.settings.muted = False
+    yield
+    audio.settings.volume = 0.7
+    audio.settings.muted = False
+
+
 class AudioLog:
     """What would have been played/spoken during a test.
 

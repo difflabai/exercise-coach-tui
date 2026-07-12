@@ -1,13 +1,152 @@
-"""Sound effects: tone generation and playback."""
+"""Sound effects: tone generation and playback, plus the master AudioSettings."""
 
+import array
 import atexit
 import functools
 import hashlib
+import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
+
+# ---------------------------------------------------------------------------
+# Master volume / mute
+# ---------------------------------------------------------------------------
+
+def _clamp(volume: float) -> float:
+    """Clamp to 0.0-1.0, rounded to 2 decimals so 10% steps stay exact."""
+    return min(1.0, max(0.0, round(volume, 2)))
+
+
+class AudioSettings:
+    """Master volume (0.0-1.0, default 0.7) and mute. Shared instance: `settings`.
+
+    Steps are 10% and clamped. User-driven changes (step_up/step_down/
+    toggle_mute) are persisted to a small settings JSON in the same XDG dir
+    as the state file; `set_volume` and direct attribute writes (CLI flags)
+    deliberately are not, so flags override for one run without sticking.
+    """
+
+    STEP = 0.1
+
+    def __init__(self, volume: float = 0.7, muted: bool = False) -> None:
+        self.volume = _clamp(volume)
+        self.muted = muted
+
+    def set_volume(self, volume: float) -> None:
+        self.volume = _clamp(volume)
+
+    def step_up(self) -> None:
+        self.set_volume(self.volume + self.STEP)
+        save_settings("volume")
+
+    def step_down(self) -> None:
+        self.set_volume(self.volume - self.STEP)
+        save_settings("volume")
+
+    def toggle_mute(self) -> None:
+        self.muted = not self.muted
+        save_settings("muted")
+
+    def effective(self) -> float:
+        """Playback level: 0.0 when muted, else the master volume."""
+        return 0.0 if self.muted else self.volume
+
+    def percent(self) -> int:
+        return int(round(self.volume * 100))
+
+
+settings = AudioSettings()
+
+
+def _settings_file():
+    # Lazy import: state.py's DATA_DIR is patched in tests, read it live.
+    from . import state
+    return state.DATA_DIR / "settings.json"
+
+
+def load_settings() -> None:
+    """Load persisted volume/mute into `settings`. Missing/corrupt file keeps defaults."""
+    try:
+        data = json.loads(_settings_file().read_text())
+        if not isinstance(data, dict):  # valid JSON but not an object (null, list…)
+            return
+        settings.set_volume(float(data.get("volume", settings.volume)))
+        settings.muted = bool(data.get("muted", settings.muted))
+    except (OSError, ValueError, TypeError):
+        pass
+
+
+def save_settings(*keys: str) -> None:
+    """Persist the named keys ("volume"/"muted"; no args = both), merged into
+    whatever is already on disk.
+
+    Merging matters: CLI flags override for one run without being persisted,
+    so a toggle_mute must write only "muted" — writing both would silently
+    replace the saved volume with a transient --volume flag value.
+    Best-effort: failure must never interrupt a workout."""
+    try:
+        path = _settings_file()
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, ValueError):
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        for key in keys or ("volume", "muted"):
+            data[key] = getattr(settings, key)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data))
+    except OSError:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# PCM scaling (audioop was removed in 3.13 — this is the pure replacement)
+# ---------------------------------------------------------------------------
+
+def scale_pcm(data: bytes, factor: float) -> bytes:
+    """Scale raw signed 16-bit little-endian PCM by `factor` (0.0-1.0).
+
+    Pure Python: int16 samples are multiplied and truncated. A trailing odd
+    byte (mid-sample split) is passed through untouched.
+    """
+    if factor >= 1.0:
+        return data
+    if factor <= 0.0:
+        return b"\x00" * len(data)
+    tail = b""
+    if len(data) % 2:
+        data, tail = data[:-1], data[-1:]
+    samples = array.array("h")
+    samples.frombytes(data)
+    if sys.byteorder == "big":
+        samples.byteswap()
+    for i in range(len(samples)):
+        samples[i] = int(samples[i] * factor)
+    if sys.byteorder == "big":
+        samples.byteswap()
+    return samples.tobytes() + tail
+
+
+def _scale_wav(data: bytes, factor: float) -> bytes:
+    """Return a copy of a 16-bit WAV with its samples scaled by `factor`."""
+    import io
+    import wave
+    if factor >= 1.0:
+        return data
+    with wave.open(io.BytesIO(data), "rb") as w:
+        params = w.getparams()
+        frames = w.readframes(w.getnframes())
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as out:
+        out.setparams(params)
+        out.writeframes(scale_pcm(frames, factor))
+    return buf.getvalue()
+
 
 _sound_dir: str | None = None
 _sound_files: dict[str, str] = {}
@@ -27,6 +166,17 @@ def _cleanup_sounds() -> None:
                 pass
     if _sound_dir is not None:
         shutil.rmtree(_sound_dir, ignore_errors=True)
+
+
+def stop_sounds() -> None:
+    """Stop any in-flight tone players (hard mute). Finished procs are reaped
+    on the next play_sound / at exit, so just terminate the live ones."""
+    for p in _players:
+        if p.poll() is None:
+            try:
+                p.terminate()
+            except OSError:
+                pass
 
 
 def _sound_path(sound_data: bytes) -> str:
@@ -74,8 +224,8 @@ def _generate_reward_tone() -> bytes:
     """A short rising two-note chime for set completion."""
     import io
     import wave
-    tone1 = _generate_tone(880, 120, 0.4)
-    tone2 = _generate_tone(1175, 200, 0.4)
+    tone1 = _generate_tone(880, 120, 1.0)
+    tone2 = _generate_tone(1175, 200, 1.0)
     buf = io.BytesIO()
     with wave.open(io.BytesIO(tone1), "rb") as w1, wave.open(io.BytesIO(tone2), "rb") as w2:
         with wave.open(buf, "wb") as out:
@@ -92,9 +242,9 @@ def _generate_exercise_complete_tone() -> bytes:
     import io
     import wave
     tones = [
-        _generate_tone(784, 100, 0.4),
-        _generate_tone(988, 100, 0.4),
-        _generate_tone(1319, 250, 0.4),
+        _generate_tone(784, 100, 1.0),
+        _generate_tone(988, 100, 1.0),
+        _generate_tone(1319, 250, 1.0),
     ]
     buf = io.BytesIO()
     with wave.open(buf, "wb") as out:
@@ -119,13 +269,20 @@ def sound_group_complete() -> bytes:
 
 @functools.cache
 def sound_rest_done() -> bytes:
-    return _generate_tone(1047, 300, 0.5)  # C5 ping when rest finishes
+    return _generate_tone(1047, 300, 1.0)  # C5 ping when rest finishes
 
 
 def play_sound(sound_data: bytes) -> None:
-    """Play a WAV sound from bytes (non-blocking). Temp files are cached per tone."""
+    """Play a WAV sound from bytes (non-blocking), scaled to the master volume.
+
+    Tones are generated once at full amplitude; the int16 PCM is scaled here at
+    play time. Temp files are cached per (tone, volume). Muted / zero volume
+    skips playback entirely."""
+    vol = settings.effective()
+    if vol <= 0.0:
+        return
     try:
-        path = _sound_path(sound_data)
+        path = _sound_path(_scale_wav(sound_data, vol))
         for cmd in (["afplay", path], ["aplay", "-q", path]):
             try:
                 proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

@@ -9,6 +9,8 @@ from pathlib import Path
 
 from rich.console import Console
 
+from .audio import load_settings
+from .audio import settings as audio_settings
 from .cassette import (
     cassette_content_hash,
     count_sets,
@@ -108,12 +110,25 @@ def main() -> None:
         help="Rest seconds. Text input defaults to 75; JSON cassettes keep their own "
              "rest unless this flag is passed explicitly (even --rest 75 overrides).",
     )
+    parser.add_argument(
+        "--volume", type=int, default=None, metavar="N",
+        help="Master volume 0-100 for this run (overrides the persisted setting)",
+    )
+    parser.add_argument("--mute", action="store_true", help="Start muted (captions still show)")
     parser.add_argument("--resume", action="store_true", help="Resume last workout without prompting")
     parser.add_argument("--reset", "--restart", action="store_true", help="Discard saved state and exit")
     parser.add_argument("--log", action="store_true", help="Print current saved log and exit")
     args = parser.parse_args()
 
     migrate_legacy_files()
+
+    # Volume: persisted setting first, CLI flags override (for this run only —
+    # they are not persisted; runtime key changes are).
+    load_settings()
+    if args.volume is not None:
+        audio_settings.set_volume(args.volume / 100)
+    if args.mute:
+        audio_settings.muted = True
 
     # args.rest is None unless --rest was passed; text input falls back to 75.
     rest = args.rest if args.rest is not None else 75

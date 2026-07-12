@@ -42,13 +42,25 @@ Plank 3x40s | BW
 ### Options
 
 ```
---rest N    Rest seconds between sets. Text workouts default to 75; JSON
-            cassettes keep their own rest values unless --rest is passed
-            explicitly (an explicit --rest 75 also overrides).
---resume    Resume the last workout without prompting
---reset     Discard saved progress and exit
---log       Print current saved progress and exit
+--rest N     Rest seconds between sets. Text workouts default to 75; JSON
+             cassettes keep their own rest values unless --rest is passed
+             explicitly (an explicit --rest 75 also overrides).
+--volume N   Master volume 0-100 for this run (overrides the saved setting)
+--mute       Start muted (captions still show everything the voice would say)
+--resume     Resume the last workout without prompting
+--reset      Discard saved progress and exit
+--log        Print current saved progress and exit
 ```
+
+### Volume
+
+One master volume (default 70%) covers both the chimes and the voice, with a hard mute on top:
+
+- **Keys, on every screen:** `-` / `+` (or `=`) step the volume by 10%, `m` toggles mute — a hard mute that also cuts off any speech or chime already playing. The current level shows at the right of the progress bar (`🔊 70%`, or `🔇` when muted).
+- **Flags:** `--volume N` (0-100) and `--mute` set the level for one run without touching the saved setting.
+- **Persistence:** key changes are saved to `settings.json` in the data dir (see below), so your level sticks between sessions.
+
+Muting never mutes the experience: captions keep showing every coaching line, so the TUI stays fully usable with sound off.
 
 ### Resume
 
@@ -56,7 +68,7 @@ Progress auto-saves on every completed set and on Ctrl-C. Re-run the same workou
 
 ### Data files
 
-Saved progress (`.workout_state.json`) and the session log (`workout_log.txt`) live in `~/.local/share/exercise-coach/` (or `$XDG_DATA_HOME/exercise-coach/` if set). Files from older versions that sat next to `coach.py` are moved there automatically on first run.
+Saved progress (`.workout_state.json`), the session log (`workout_log.txt`), and audio settings (`settings.json`) live in `~/.local/share/exercise-coach/` (or `$XDG_DATA_HOME/exercise-coach/` if set). Files from older versions that sat next to `coach.py` are moved there automatically on first run.
 
 ## Voice
 

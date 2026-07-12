@@ -6,6 +6,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from .audio import settings as audio_settings
 from .cassette import count_sets, rounds_completed
 from .models import Cassette, ExerciseData, Group
 from .tts import CAPTION_DURATION, current_caption
@@ -163,11 +164,11 @@ def build_rest_panel(rest_seconds: int, remaining: float, overtime: bool) -> Pan
     """Panel shown during rest periods."""
     if overtime:
         ot_secs = int(-remaining)
-        timer_text = f"OVERTIME +{ot_secs}s  (Enter to continue • b = back • p = pause)"
+        timer_text = f"OVERTIME +{ot_secs}s  (Enter to continue • b = back • p = pause • m/-/+ vol)"
         timer_style = "bold red"
     else:
         secs_left = int(remaining) + 1
-        timer_text = f"{secs_left}s remaining  (Enter to skip • b = back • p = pause)"
+        timer_text = f"{secs_left}s remaining  (Enter to skip • b = back • p = pause • m/-/+ vol)"
         timer_style = "bold yellow"
     content = f"Resting...\n\n[{timer_style}]{timer_text}[/{timer_style}]"
     return Panel(content, title="Rest", border_style="yellow", expand=True)
@@ -208,6 +209,13 @@ def estimate_remaining(cassette: Cassette, avg_rep_set: float = 30.0) -> int:
     return remaining
 
 
+def volume_label() -> str:
+    """Footer volume indicator: '🔊 70%' or '🔇' when muted."""
+    if audio_settings.muted:
+        return "🔇"
+    return f"🔊 {audio_settings.percent()}%"
+
+
 def build_progress_bar(cassette: Cassette, avg_rep_set: float = 30.0) -> str:
     total, done = count_sets(cassette)
     pct = done / total * 100 if total else 100
@@ -215,7 +223,10 @@ def build_progress_bar(cassette: Cassette, avg_rep_set: float = 30.0) -> str:
     filled = int(bar_len * done / total) if total else bar_len
     bar = "█" * filled + "░" * (bar_len - filled)
     eta = format_eta(estimate_remaining(cassette, avg_rep_set))
-    return f"[bold cyan]Progress:[/bold cyan] {bar} {done}/{total} sets ({pct:.0f}%)  ⏱ ETA: {eta}"
+    return (
+        f"[bold cyan]Progress:[/bold cyan] {bar} {done}/{total} sets ({pct:.0f}%)"
+        f"  ⏱ ETA: {eta}  {volume_label()}"
+    )
 
 
 def render_layout(live: Live, overview: Table, panel: Panel, progress_text: str) -> None:

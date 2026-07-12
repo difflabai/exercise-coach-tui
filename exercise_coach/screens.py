@@ -19,7 +19,8 @@ from rich.live import Live
 from rich.panel import Panel
 from rich.text import Text
 
-from .audio import play_sound, sound_rest_done
+from .audio import play_sound, sound_rest_done, stop_sounds
+from .audio import settings as audio_settings
 from .events import Event
 from .models import Cassette, ExerciseData, Group, TimedCue
 from .term import (
@@ -118,6 +119,24 @@ def run_screen(
                 if real_input:
                     enter_cbreak()
                     drain_stdin()
+                continue
+            # Global volume keys, available on every screen. A screen-specific
+            # mapping always wins (keymap is checked first, above), and these
+            # never count as activity: no timer state is touched — the loop
+            # just re-renders with the new footer level.
+            if key == "-":
+                audio_settings.step_down()
+                continue
+            if key in ("+", "="):  # '=' is unshifted '+' on most layouts
+                audio_settings.step_up()
+                continue
+            if key == "m":
+                audio_settings.toggle_mute()
+                if audio_settings.muted:
+                    # Hard mute: silence in-flight speech and chimes too,
+                    # not just the next utterance.
+                    terminate_say()
+                    stop_sounds()
                 continue
             if key and char_handler is not None:
                 char_handler(key)
@@ -332,16 +351,35 @@ def timed_hold(
     duration = ex.sets[round_idx].reps
     cues = get_cues_for_round(group, round_idx)
 
-    # Get in position
+    # Get in position — a real run_screen (not a blind sleep loop) so keys
+    # work here like on every other screen: m/-/+ volume, p pause, Ctrl-Z,
+    # and the hold's own s/b (skip/back apply to the whole hold).
     say_sync("Get in position")
-    for countdown in range(3, 0, -1):
+    countdown = {"start": now()}
+
+    def countdown_tick() -> Event | None:
+        return Event.DONE if now() - countdown["start"] >= 3 else None
+
+    def countdown_render() -> None:
+        secs_left = max(1, 3 - int(now() - countdown["start"]))
         overview = build_overview(cassette, cur_phase, cur_group)
         panel = build_active_panel(
             cassette, group, ex, round_idx, ex_idx,
-            status="Get in position...", timer_text=str(countdown), timer_style="bold yellow",
+            status="Get in position...", timer_text=str(secs_left), timer_style="bold yellow",
         )
         render_layout(live, overview, panel, build_progress_bar(cassette, avg_rep_set))
-        sleep(1)
+
+    def countdown_on_paused(secs: float) -> None:
+        countdown["start"] += secs
+
+    ev = run_screen(
+        live, countdown_render, {"s": Event.SKIP, "b": Event.BACK},
+        tick=countdown_tick, now=now, read_key=read_key, sleep=sleep,
+        pause=_make_pause(live, cassette, cur_phase, cur_group, avg_rep_set,
+                          now, read_key, sleep, countdown_on_paused),
+    )
+    if ev is not Event.DONE:
+        return ev
 
     say("Go")
     state = {"start": now(), "cue_idx": 0, "remaining": float(duration)}
@@ -396,7 +434,7 @@ def rep_set_screen(
     """Wait for the user to finish a rep-based set.
     Returns (event, total seconds spent paused) so the caller can measure
     active set duration. Event is DONE, FAIL, SKIP, or BACK."""
-    key_hint = "Enter = done  •  f = failed  •  s = skip  •  b = back  •  p = pause"
+    key_hint = "Enter = done  •  f = failed  •  s = skip  •  b = back  •  p = pause  •  m/-/+ vol"
     paused = {"secs": 0.0}
 
     def render() -> None:
