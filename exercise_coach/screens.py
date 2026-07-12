@@ -21,6 +21,7 @@ from rich.text import Text
 
 from .audio import play_sound, sound_rest_done, stop_sounds
 from .audio import settings as audio_settings
+from .buddy import Mood
 from .events import Event
 from .models import Cassette, ExerciseData, Group, TimedCue
 from .term import (
@@ -170,7 +171,8 @@ def pause_screen(
             subtitle="p = resume  •  Ctrl-Z = suspend to shell",
             border_style="yellow", expand=True, padding=(2, 4),
         )
-        render_layout(live, overview, panel, build_progress_bar(cassette, avg_rep_set))
+        render_layout(live, overview, panel, build_progress_bar(cassette, avg_rep_set),
+                      mood=Mood.PAUSED, now=now())
 
     run_screen(
         live, render, {"p": Event.DONE, "enter": Event.DONE},
@@ -251,7 +253,8 @@ def transition_screen(
         panel = Panel(
             content, title=title, border_style=border, expand=True, padding=(1, 4),
         )
-        render_layout(live, overview, panel, build_progress_bar(cassette, avg_rep_set))
+        render_layout(live, overview, panel, build_progress_bar(cassette, avg_rep_set),
+                      mood=Mood.READY, now=now())
 
     return run_screen(
         live, render, keymap,
@@ -280,7 +283,8 @@ def context_screen(
             f"[bold]{name}[/bold]\n{note}\n\nPress Enter to continue",
             title="Context", border_style="yellow", expand=True,
         )
-        render_layout(live, overview, panel, build_progress_bar(cassette, avg_rep_set))
+        render_layout(live, overview, panel, build_progress_bar(cassette, avg_rep_set),
+                      mood=Mood.READY, now=now())
 
     return run_screen(
         live, render, {"enter": Event.DONE},
@@ -320,7 +324,12 @@ def rest_timer(
         remaining = rest_seconds - (now() - state["start"])
         overview = build_overview(cassette, cur_phase, cur_group)
         panel = build_rest_panel(rest_seconds, remaining, remaining < 0)
-        render_layout(live, overview, panel, build_progress_bar(cassette, avg_rep_set))
+        if remaining < 0:
+            mood, mood_intensity = Mood.OVERTIME, float(state["nags"])
+        else:
+            mood, mood_intensity = Mood.RESTING, remaining  # seconds left: wakes Rep near 0
+        render_layout(live, overview, panel, build_progress_bar(cassette, avg_rep_set),
+                      mood=mood, mood_intensity=mood_intensity, now=now())
 
     def on_paused(secs: float) -> None:
         state["start"] += secs
@@ -367,7 +376,8 @@ def timed_hold(
             cassette, group, ex, round_idx, ex_idx,
             status="Get in position...", timer_text=str(secs_left), timer_style="bold yellow",
         )
-        render_layout(live, overview, panel, build_progress_bar(cassette, avg_rep_set))
+        render_layout(live, overview, panel, build_progress_bar(cassette, avg_rep_set),
+                      mood=Mood.READY, now=now())
 
     def countdown_on_paused(secs: float) -> None:
         countdown["start"] += secs
@@ -402,7 +412,10 @@ def timed_hold(
             cassette, group, ex, round_idx, ex_idx,
             status="HOLD!", timer_text=f"{secs_left}s", timer_style="bold green",
         )
-        render_layout(live, overview, panel, build_progress_bar(cassette, avg_rep_set))
+        # Fraction of the hold elapsed — Rep trembles harder as it approaches 1.
+        elapsed_frac = min(1.0, max(0.0, 1 - state["remaining"] / duration)) if duration else 1.0
+        render_layout(live, overview, panel, build_progress_bar(cassette, avg_rep_set),
+                      mood=Mood.HOLDING, mood_intensity=elapsed_frac, now=now())
 
     def on_paused(secs: float) -> None:
         state["start"] += secs
@@ -442,7 +455,8 @@ def rep_set_screen(
         panel = build_active_panel(
             cassette, group, ex, round_idx, ex_idx, status=key_hint,
         )
-        render_layout(live, overview, panel, build_progress_bar(cassette, avg_rep_set))
+        render_layout(live, overview, panel, build_progress_bar(cassette, avg_rep_set),
+                      mood=Mood.WORKING, now=now())
 
     def on_paused(secs: float) -> None:
         paused["secs"] += secs
@@ -481,7 +495,8 @@ def get_failure_reps(
             status=f"Reps completed: {display_reps}",
             timer_text="Type number, then Enter", timer_style="bold yellow",
         )
-        render_layout(live, overview, panel, build_progress_bar(cassette, avg_rep_set))
+        render_layout(live, overview, panel, build_progress_bar(cassette, avg_rep_set),
+                      mood=Mood.WORKING, now=now())
 
     def on_char(key: str) -> None:
         if key.isdigit():

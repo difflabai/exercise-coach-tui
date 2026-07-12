@@ -4,13 +4,14 @@ import array
 import atexit
 import functools
 import hashlib
-import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
+
+from .settings import load_data, save_data
 
 # ---------------------------------------------------------------------------
 # Master volume / mute
@@ -62,46 +63,24 @@ class AudioSettings:
 settings = AudioSettings()
 
 
-def _settings_file():
-    # Lazy import: state.py's DATA_DIR is patched in tests, read it live.
-    from . import state
-    return state.DATA_DIR / "settings.json"
-
-
 def load_settings() -> None:
     """Load persisted volume/mute into `settings`. Missing/corrupt file keeps defaults."""
+    data = load_data()
     try:
-        data = json.loads(_settings_file().read_text())
-        if not isinstance(data, dict):  # valid JSON but not an object (null, list…)
-            return
         settings.set_volume(float(data.get("volume", settings.volume)))
         settings.muted = bool(data.get("muted", settings.muted))
-    except (OSError, ValueError, TypeError):
+    except (ValueError, TypeError):
         pass
 
 
 def save_settings(*keys: str) -> None:
-    """Persist the named keys ("volume"/"muted"; no args = both), merged into
-    whatever is already on disk.
+    """Persist the named keys ("volume"/"muted"; no args = both) via
+    settings.py's merge-on-save.
 
     Merging matters: CLI flags override for one run without being persisted,
     so a toggle_mute must write only "muted" — writing both would silently
-    replace the saved volume with a transient --volume flag value.
-    Best-effort: failure must never interrupt a workout."""
-    try:
-        path = _settings_file()
-        try:
-            data = json.loads(path.read_text())
-        except (OSError, ValueError):
-            data = {}
-        if not isinstance(data, dict):
-            data = {}
-        for key in keys or ("volume", "muted"):
-            data[key] = getattr(settings, key)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(data))
-    except OSError:
-        pass
+    replace the saved volume with a transient --volume flag value."""
+    save_data({key: getattr(settings, key) for key in keys or ("volume", "muted")})
 
 
 # ---------------------------------------------------------------------------

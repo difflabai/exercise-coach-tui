@@ -17,6 +17,7 @@ from rich.console import Console
 from rich.live import Live
 
 from .audio import play_sound, sound_group_complete, sound_set_complete
+from .buddy import celebrate
 from .cassette import all_groups, count_sets, rounds_completed
 from .events import Event
 from .models import Cassette, Group
@@ -279,16 +280,24 @@ class Player:
                         set_data.actual_reps = set_data.reps
                     self.rep_set_durations.append(self.now() - set_start - paused_secs)
 
-                # Set complete
+                # Set complete. No celebration after a reported failure —
+                # Rep cheering "Nailed it!" right after the user typed a
+                # missed rep count would read as mockery.
                 play_sound(sound_set_complete())
+                if not set_data.failure:
+                    celebrate(self.now())
 
             last_in_round = self.ex_idx == len(group.exercises) - 1
             self.advance_set()
 
             if last_in_round:
-                # Round complete
+                # Round complete (same failure gate: for straight sets this
+                # fires in the same instant as the set-complete stamp above,
+                # so it must not reopen the celebration window either).
                 speak_round_complete(group, r)
                 play_sound(sound_set_complete())
+                if not set_data.failure:
+                    celebrate(self.now())
                 save_state(
                     self.cassette,
                     {"phase_idx": pi, "group_idx": gi, "round_idx": r + 1},
@@ -314,6 +323,7 @@ class Player:
         if not group.skipped:
             speak(group.voice_group_complete)
             play_sound(sound_group_complete())
+            celebrate(self.now())
         return Event.DONE
 
     def _skip_group(self, group: Group, round_idx: int) -> Event:
