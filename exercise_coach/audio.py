@@ -51,10 +51,10 @@ def _sound_path(sound_data: bytes) -> str:
 
 def _generate_tone(frequency: int, duration_ms: int, volume: float = 0.5) -> bytes:
     """Generate a WAV tone in memory. Returns raw WAV bytes."""
-    import struct
-    import wave
     import io
     import math
+    import struct
+    import wave
     sample_rate = 44100
     n_samples = int(sample_rate * duration_ms / 1000)
     buf = io.BytesIO()
@@ -72,7 +72,8 @@ def _generate_tone(frequency: int, duration_ms: int, volume: float = 0.5) -> byt
 
 def _generate_reward_tone() -> bytes:
     """A short rising two-note chime for set completion."""
-    import io, wave
+    import io
+    import wave
     tone1 = _generate_tone(880, 120, 0.4)
     tone2 = _generate_tone(1175, 200, 0.4)
     buf = io.BytesIO()
@@ -88,7 +89,8 @@ def _generate_reward_tone() -> bytes:
 
 def _generate_exercise_complete_tone() -> bytes:
     """A three-note ascending chime for exercise/group completion."""
-    import io, wave
+    import io
+    import wave
     tones = [
         _generate_tone(784, 100, 0.4),
         _generate_tone(988, 100, 0.4),
@@ -105,17 +107,17 @@ def _generate_exercise_complete_tone() -> bytes:
     return buf.getvalue()
 
 
-@functools.lru_cache(maxsize=None)
+@functools.cache
 def sound_set_complete() -> bytes:
     return _generate_reward_tone()
 
 
-@functools.lru_cache(maxsize=None)
+@functools.cache
 def sound_group_complete() -> bytes:
     return _generate_exercise_complete_tone()
 
 
-@functools.lru_cache(maxsize=None)
+@functools.cache
 def sound_rest_done() -> bytes:
     return _generate_tone(1047, 300, 0.5)  # C5 ping when rest finishes
 

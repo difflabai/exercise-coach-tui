@@ -1,0 +1,26 @@
+[project]
+name = "exercise-coach"
+version = "0.1.0"
+description = "Cassette-driven TUI workout coach with voice cues"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "rich",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Make the in-repo `exercise_coach` package importable without installing.
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = [
+    "E501",  # long lines exist in the current code (tone tables, rich markup)
+    "E401",  # `import io, wave` style multi-imports inside functions
+    "UP035", # `typing.Callable` is used throughout; migration is a separate cleanup
+]

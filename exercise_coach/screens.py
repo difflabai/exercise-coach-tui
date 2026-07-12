@@ -26,8 +26,10 @@ from .term import (
     WorkoutPaused,
     drain_stdin,
     enter_cbreak,
-    read_key as _real_read_key,
     restore_terminal,
+)
+from .term import (
+    read_key as _real_read_key,
 )
 from .tts import say, say_sync, terminate_say
 from .ui import (

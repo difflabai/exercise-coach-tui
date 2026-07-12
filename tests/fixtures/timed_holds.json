@@ -1,0 +1,56 @@
+{
+  "version": "1.1",
+  "meta": {
+    "date": "2026-07-12",
+    "title": "Core Holds",
+    "program": "Test Program",
+    "rest_default": 60
+  },
+  "voice": {
+    "session_intro": "Core holds. Short and nasty.",
+    "session_complete": "Core done. Shake it out."
+  },
+  "phases": [
+    {
+      "type": "main",
+      "voice_intro": "Two holds. Plank, then hollow body.",
+      "groups": [
+        {
+          "type": "straight",
+          "rounds": 2,
+          "rest": 45,
+          "voice_intro": "Plank. Thirty seconds, twice.",
+          "voice_round_complete": ["First plank down."],
+          "voice_group_complete": "Planks done.",
+          "voice_during_set": [
+            [
+              { "at_seconds": 10, "line": "Squeeze the glutes." },
+              { "at_seconds": 20, "line": "Ten seconds left." },
+              { "at_seconds": 27, "line": "Three. Two. One." }
+            ],
+            [
+              { "at_seconds": 15, "line": "Halfway. Hips level." },
+              { "at_seconds": 27, "line": "Three. Two. One." }
+            ]
+          ],
+          "exercises": [
+            { "name": "Plank", "timed": true, "reps": 30 }
+          ]
+        },
+        {
+          "type": "straight",
+          "rounds": 2,
+          "rest": 45,
+          "voice_intro": "Hollow body hold. Twenty seconds.",
+          "voice_during_set": [
+            [{ "at_seconds": 10, "line": "Press the low back down." }],
+            [{ "at_seconds": 10, "line": "Last one. Stay tight." }]
+          ],
+          "exercises": [
+            { "name": "Hollow Body Hold", "timed": true, "reps": 20 }
+          ]
+        }
+      ]
+    }
+  ]
+}
