@@ -1,1 +1,7 @@
 __pycache__/
+workout_log.txt
+worktrees/
+.workout_state.json
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
