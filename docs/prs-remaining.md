@@ -1,7 +1,13 @@
 # Remaining PRs — handoff
 
-State of the improvement plan from `docs/recommendations.md` as of 2026-07-12. Everything
-below the line is **not yet done**; everything above it is merged to master.
+State of the improvement plan from `docs/recommendations.md` as of 2026-07-12.
+
+**Update (2026-07-12, later): all four remaining PRs below have landed** — A = #8
+(Rep, the ASCII buddy), B = #9 (jump navigation + `--only`), C = #10 (paper cuts:
+hold fail/early-end, ETA accounting, learned pace, color-env test hermeticity),
+D = #11 (config.toml, JSONL history, session summary, T-5s rest tick, `--quiet`).
+473 tests green as of #11. Only the [deferred spec-bump items](#deferred-needs-another-cassette-spec-bump--user-handles-spec-versions)
+remain, parked by design. The sections below are kept as written for the record.
 
 ## Done (merged)
 
