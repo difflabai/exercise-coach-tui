@@ -2,9 +2,11 @@
 """Build exercise-coach.skill from the skills/exercise-coach/ source tree.
 
 The archive is built deterministically (sorted entries, fixed timestamps,
-no permission bits that vary by umask) so that rebuilding from an unchanged
-tree is byte-identical. CI uses that property to fail when the committed
-artifact is stale: rebuild, then `git diff --exit-code exercise-coach.skill`.
+no permission bits that vary by umask, and stored uncompressed — deflate
+output differs between zlib builds, e.g. zlib-ng vs zlib) so that rebuilding
+from an unchanged tree is byte-identical on any machine. CI uses that
+property to fail when the committed artifact is stale: rebuild, then
+`git diff --exit-code exercise-coach.skill`.
 
 Usage:
     python scripts/build_skill.py
@@ -28,11 +30,10 @@ def main() -> int:
         return 1
 
     files = sorted(p for p in SOURCE.rglob("*") if p.is_file())
-    with zipfile.ZipFile(ARTIFACT, "w", zipfile.ZIP_DEFLATED) as zf:
+    with zipfile.ZipFile(ARTIFACT, "w", zipfile.ZIP_STORED) as zf:
         for path in files:
             arcname = f"exercise-coach/{path.relative_to(SOURCE).as_posix()}"
             info = zipfile.ZipInfo(arcname, date_time=FIXED_DATE)
-            info.compress_type = zipfile.ZIP_DEFLATED
             info.external_attr = 0o644 << 16
             zf.writestr(info, path.read_bytes())
 
