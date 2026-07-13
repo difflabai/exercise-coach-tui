@@ -21,11 +21,21 @@
           "rest": 120,
           "setup": "Bench set to 60 kilos, barbell loaded for rows behind you.",
           "voice_intro": "Superset. Bench press into bent-over rows. No rest between the two.",
-          "voice_round_complete": ["Round one banked.", "Round two banked. Last one."],
+          "voice_round_complete": ["Round one banked.", "Round two banked. Last one.", "Round three banked."],
           "voice_group_complete": "Superset complete. Well done.",
           "exercises": [
-            { "name": "Bench Press", "load": "60kg", "reps": 8 },
-            { "name": "Bent-over Row", "load": "50kg", "reps": 10 }
+            {
+              "name": "Bench Press",
+              "load": "60kg",
+              "timed": false,
+              "sets": [{ "reps": 8 }, { "reps": 8 }, { "reps": 8 }]
+            },
+            {
+              "name": "Bent-over Row",
+              "load": "50kg",
+              "timed": false,
+              "sets": [{ "reps": 10 }, { "reps": 10 }, { "reps": 10 }]
+            }
           ]
         }
       ]

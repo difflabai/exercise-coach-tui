@@ -223,6 +223,80 @@ class TestLoadCassetteFromDict:
         assert groups[0].rest == 42
         assert groups[1].rest == 90
 
+    def test_explicit_zero_rest_is_kept(self):
+        # rest: 0 is a legal spec value (flow circuits, back-to-back
+        # warmup rounds) and must not be coerced to the default.
+        data = {
+            "meta": {"rest_default": 105},
+            "phases": [
+                {"groups": [{"rest": 0, "exercises": [{"name": "A", "reps": 5}]}]}
+            ],
+        }
+        assert load_cassette_from_dict(data).phases[0].groups[0].rest == 0
+
+    def test_short_sets_padding_warns_on_stderr(self, capsys):
+        data = {
+            "phases": [
+                {
+                    "groups": [
+                        {
+                            "rounds": 3,
+                            "exercises": [{"name": "Squat", "sets": [{"reps": 10}]}],
+                        }
+                    ]
+                }
+            ]
+        }
+        load_cassette_from_dict(data)
+        err = capsys.readouterr().err
+        assert "'Squat' lists 1 sets for 3 rounds" in err
+
+    def test_cue_past_hold_duration_warns_on_stderr(self, capsys):
+        data = {
+            "phases": [
+                {
+                    "groups": [
+                        {
+                            "rounds": 1,
+                            "exercises": [
+                                {"name": "Plank", "timed": True, "sets": [{"reps": 45}]}
+                            ],
+                            "voice_during_set": [
+                                [
+                                    {"at_seconds": 20, "line": "Halfway."},
+                                    {"at_seconds": 50, "line": "Almost."},
+                                ]
+                            ],
+                        }
+                    ]
+                }
+            ]
+        }
+        load_cassette_from_dict(data)
+        err = capsys.readouterr().err
+        assert "cue at 50s" in err
+        assert "45s hold" in err
+        assert "cue at 20s" not in err
+
+    def test_cue_within_hold_duration_is_silent(self, capsys):
+        data = {
+            "phases": [
+                {
+                    "groups": [
+                        {
+                            "rounds": 1,
+                            "exercises": [
+                                {"name": "Plank", "timed": True, "sets": [{"reps": 45}]}
+                            ],
+                            "voice_during_set": [[{"at_seconds": 20, "line": "Halfway."}]],
+                        }
+                    ]
+                }
+            ]
+        }
+        load_cassette_from_dict(data)
+        assert capsys.readouterr().err == ""
+
     def test_voice_during_set_parsed_as_timed_cues_per_round(self):
         data = {
             "phases": [

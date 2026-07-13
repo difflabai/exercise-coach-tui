@@ -20,7 +20,7 @@
           "rounds": 2,
           "rest": 45,
           "voice_intro": "Plank. Thirty seconds, twice.",
-          "voice_round_complete": ["First plank down."],
+          "voice_round_complete": ["First plank down.", "Second plank down."],
           "voice_group_complete": "Planks done.",
           "voice_during_set": [
             [
@@ -34,7 +34,12 @@
             ]
           ],
           "exercises": [
-            { "name": "Plank", "timed": true, "reps": 30 }
+            {
+              "name": "Plank",
+              "load": "bodyweight",
+              "timed": true,
+              "sets": [{ "reps": 30 }, { "reps": 30 }]
+            }
           ]
         },
         {
@@ -47,7 +52,12 @@
             [{ "at_seconds": 10, "line": "Last one. Stay tight." }]
           ],
           "exercises": [
-            { "name": "Hollow Body Hold", "timed": true, "reps": 20 }
+            {
+              "name": "Hollow Body Hold",
+              "load": "bodyweight",
+              "timed": true,
+              "sets": [{ "reps": 20 }, { "reps": 20 }]
+            }
           ]
         }
       ]

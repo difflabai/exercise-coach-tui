@@ -8,26 +8,38 @@ Supplementary TUI for [ai-health](https://github.com/difflabai/ai-health) — an
 
 The coach reads structured JSON "cassette" files that describe a workout session. Use the [`exercise-coach.skill`](https://github.com/difflabai/exercise-coach-tui/blob/master/exercise-coach.skill) to generate a cassette from your workout plan:
 
-1. [Download the skill](https://github.com/difflabai/exercise-coach-tui/raw/master/exercise-coach.skill) and install it in Claude Code
-2. Ask Claude to create a cassette for your workout — it will output JSON
-3. Run `python coach.py` and paste the cassette JSON into interactive mode
+1. [Download the skill](https://github.com/difflabai/exercise-coach-tui/raw/master/exercise-coach.skill) and install it in Claude Code, or in claude.ai (Settings → Capabilities → Skills) — the latter is how the companion [ai-health](https://github.com/difflabai/ai-health) flow runs
+2. Ask Claude to create a cassette for your workout — it will output JSON (the skill validates it with [`validate.py`](skills/exercise-coach/scripts/validate.py) before presenting it)
+3. Run `coach` and paste the cassette JSON into interactive mode
 
 You can use the [ai-health](https://github.com/difflabai/ai-health) project to guide your exercises — it generates personalised workout plans that the skill can convert into cassettes.
+
+The skill's source lives unpacked in [`skills/exercise-coach/`](skills/exercise-coach/); the `.skill` archive is built from it with `python scripts/build_skill.py` (CI fails if the two drift apart).
+
+## Install
+
+```bash
+uv tool install git+https://github.com/difflabai/exercise-coach-tui
+# or: pipx install git+https://github.com/difflabai/exercise-coach-tui
+```
+
+Or run straight from a clone:
+
+```bash
+pip install rich
+python coach.py workout.json
+```
 
 ## Usage
 
 ```
-pip install rich
-```
-
-```
-python coach.py workout.json
+coach workout.json
 ```
 
 Or paste interactively:
 
 ```
-python coach.py
+coach
 ```
 
 ### Workout format
@@ -89,3 +101,7 @@ echo "the velcro cat approaches" | piper -m ~/piper-voices/en_US-ryan-high.onnx 
 ```
 
 The coach prefers `en_US-ryan-high.onnx` if present; otherwise it picks the first `.onnx` it finds in `~/piper-voices/` or `~/.local/share/piper-voices/`. To pin a specific voice, set `PIPER_MODEL=/path/to/voice.onnx`. Browse other voices at [rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices).
+
+## License
+
+[AGPL-3.0-or-later](LICENSE), matching the rest of the [ai-health](https://github.com/difflabai/ai-health) ecosystem.

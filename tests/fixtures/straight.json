@@ -27,7 +27,12 @@
           "rounds": 2,
           "rest": 30,
           "exercises": [
-            { "name": "Jumping Jacks", "reps": 20 }
+            {
+              "name": "Jumping Jacks",
+              "load": "bodyweight",
+              "timed": false,
+              "sets": [{ "reps": 20 }, { "reps": 20 }]
+            }
           ]
         }
       ]
@@ -42,12 +47,13 @@
           "rest": 90,
           "setup": "Grab the 24 kilo kettlebell.",
           "voice_intro": "Goblet squats. Three sets of ten.",
-          "voice_round_complete": ["One down.", "Two down, one to go."],
+          "voice_round_complete": ["One down.", "Two down, one to go.", "That's all three."],
           "voice_group_complete": "Squats done.",
           "exercises": [
             {
               "name": "Goblet Squat",
               "load": "24kg",
+              "timed": false,
               "sets": [{ "reps": 10 }, { "reps": 10 }, { "reps": 8 }]
             }
           ]
@@ -56,7 +62,12 @@
           "type": "straight",
           "rounds": 3,
           "exercises": [
-            { "name": "Push-up", "reps": 15 }
+            {
+              "name": "Push-up",
+              "load": "bodyweight",
+              "timed": false,
+              "sets": [{ "reps": 15 }, { "reps": 15 }, { "reps": 15 }]
+            }
           ]
         }
       ]

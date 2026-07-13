@@ -23,3 +23,18 @@ jobs:
         run: ruff check .
       - name: Test
         run: python3 -m pytest -q
+      - name: Skill artifact is fresh
+        # The committed .skill archive is built deterministically from
+        # skills/exercise-coach/ — a diff here means someone edited one
+        # side without rebuilding (python scripts/build_skill.py).
+        run: |
+          python3 scripts/build_skill.py
+          git diff --exit-code exercise-coach.skill
+      - name: Validate fixtures against the skill's cassette validator
+        # The fixtures and the generation-side validator keep each other
+        # honest: the player and generator can't silently disagree on spec.
+        run: |
+          for f in tests/fixtures/*.json; do
+            echo "== $f"
+            python3 skills/exercise-coach/scripts/validate.py "$f"
+          done

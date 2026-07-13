@@ -119,7 +119,9 @@ def load_cassette_from_dict(data: dict, rest_fallback: int = 75) -> Cassette:
     for phase_data in data.get("phases", []):
         groups = []
         for g in phase_data.get("groups", []):
-            rest = g.get("rest") or rest_default
+            rest = g.get("rest")
+            if rest is None:
+                rest = rest_default
 
             rounds = g.get("rounds", 1)
             exercises = []
@@ -133,6 +135,11 @@ def load_cassette_from_dict(data: dict, rest_fallback: int = 75) -> Cassette:
                     # An explicit sets list shorter than the group's rounds
                     # would crash playback with an IndexError mid-workout;
                     # pad by repeating the last set's target.
+                    print(
+                        f"Warning: {ex['name']!r} lists {len(sets)} sets for "
+                        f"{rounds} rounds; padding with the last set's target.",
+                        file=sys.stderr,
+                    )
                     sets.extend(
                         SetData(reps=sets[-1].reps) for _ in range(rounds - len(sets))
                     )
@@ -144,11 +151,25 @@ def load_cassette_from_dict(data: dict, rest_fallback: int = 75) -> Cassette:
                 ))
 
             timed_cues = []
-            for round_cues in g.get("voice_during_set", []):
+            for r, round_cues in enumerate(g.get("voice_during_set", [])):
                 timed_cues.append([
                     TimedCue(at_seconds=c["at_seconds"], line=c["line"])
                     for c in round_cues
                 ])
+                # A cue at/past the hold's duration never fires (the hold
+                # loop ends first). Playback tolerates it; say so loudly.
+                hold = max(
+                    (ex.sets[r].reps for ex in exercises if ex.timed and r < len(ex.sets)),
+                    default=None,
+                )
+                if hold is not None:
+                    for cue in timed_cues[-1]:
+                        if cue.at_seconds >= hold:
+                            print(
+                                f"Warning: round {r + 1} cue at {cue.at_seconds}s "
+                                f"is at or past the {hold}s hold — it will never fire.",
+                                file=sys.stderr,
+                            )
 
             groups.append(Group(
                 type=g.get("type", "straight"),

@@ -309,9 +309,9 @@ class TestRenderLog:
         lines = state.render_log(cassette).splitlines()
 
         assert lines[0] == f"{'Dead Hangs':<25} — (see notes)"
-        assert lines[1] == f"{'Jumping Jacks':<25} 2×20"
+        assert lines[1] == f"{'Jumping Jacks':<25} 2×20 | bodyweight"
         assert lines[2].startswith(f"{'Goblet Squat':<25} 3[1]×10 - failed at 6 on set 2")
-        assert lines[3] == f"{'Push-up':<25} (skipped)"
+        assert lines[3] == f"{'Push-up':<25} (skipped) | bodyweight"
         assert len(lines) == 4
 
 
